@@ -13,6 +13,8 @@ class WindowsPersistenceMechanismsParser(parsers.ArtifactFilesParser):
   """Turn various persistence objects into PersistenceFiles."""
   output_types = ["PersistenceFile"]
   supported_artifacts = ["WindowsPersistenceMechanisms"]
+  # Required for environment variable expansion
+  knowledgebase_dependencies = ["environ_systemdrive", "environ_systemroot"]
 
   def __init__(self):
     # Service keys have peculiar ways of specifying systemroot, these regexes
@@ -50,7 +52,7 @@ class WindowsPersistenceMechanismsParser(parsers.ArtifactFilesParser):
     pathspecs = []
     source_urn = None
 
-    if isinstance(persistence, rdfvalue.ServiceInformation):
+    if isinstance(persistence, rdfvalue.WindowsServiceInformation):
       if persistence.HasField("registry_key"):
         source_urn = persistence.registry_key
       if persistence.HasField("binary"):
@@ -69,5 +71,3 @@ class WindowsPersistenceMechanismsParser(parsers.ArtifactFilesParser):
     for pathspec in pathspecs:
       yield rdfvalue.PersistenceFile(pathspec=pathspec,
                                      source_urn=source_urn)
-
-

@@ -2,7 +2,10 @@
 """Test client RDFValues."""
 
 
+import socket
+
 from grr.lib import rdfvalue
+from grr.lib import type_info
 from grr.lib.rdfvalues import test_base
 from grr.proto import jobs_pb2
 
@@ -37,8 +40,8 @@ class UserTests(test_base.RDFValueTestCase):
     self.assertEqual(fast_proto.special_folders.desktop,
                      proto.special_folders.desktop)
 
-    # Serialized form of both should be the same.
-    self.assertProtoEqual(fast_proto, proto)
+    # Serialized RDFValue and protobuf have same fields.
+    self.assertRDFValueEqualToProto(fast_proto, proto)
 
   def testTimeEncoding(self):
     fast_proto = rdfvalue.User(username="user")
@@ -85,6 +88,109 @@ class UserTests(test_base.RDFValueTestCase):
         (33791, "-rwxrwxrwt"),
         # Sticky, not x
         (33784, "-rwxrwx--T"),
-        ]:
+    ]:
       value = rdfvalue.StatMode(mode)
       self.assertEqual(unicode(value), result)
+
+  def testConvertToKnowledgeBaseUser(self):
+    folders = rdfvalue.FolderInformation(desktop="/usr/local/test/Desktop")
+    user = rdfvalue.User(username="test", domain="test.com",
+                         homedir="/usr/local/test",
+                         special_folders=folders)
+    kbuser = user.ToKnowledgeBaseUser()
+    self.assertEqual(kbuser.username, "test")
+    self.assertEqual(kbuser.userdomain, "test.com")
+    self.assertEqual(kbuser.homedir, "/usr/local/test")
+    self.assertEqual(kbuser.desktop, "/usr/local/test/Desktop")
+
+  def testConvertFromKnowledgeBaseUser(self):
+    kbuser = rdfvalue.KnowledgeBaseUser(username="test", userdomain="test.com",
+                                        homedir="/usr/local/test",
+                                        desktop="/usr/local/test/Desktop",
+                                        localappdata="/usr/local/test/AppData")
+    user = rdfvalue.User().FromKnowledgeBaseUser(kbuser)
+    self.assertEqual(user.username, "test")
+    self.assertEqual(user.domain, "test.com")
+    self.assertEqual(user.homedir, "/usr/local/test")
+    self.assertEqual(user.special_folders.desktop, "/usr/local/test/Desktop")
+    self.assertEqual(user.special_folders.local_app_data,
+                     "/usr/local/test/AppData")
+
+
+class ClientURNTests(test_base.RDFValueTestCase):
+  """Test the ClientURN."""
+
+  rdfvalue_class = rdfvalue.ClientURN
+
+  def GenerateSample(self, number=0):
+    return rdfvalue.ClientURN("C.%016X" % number)
+
+  def testInitialization(self):
+    """ClientURNs don't allow empty init so we override the default test."""
+
+    self.rdfvalue_class("C.00aaeccbb45f33a3")
+
+    # Initialize from another instance.
+    sample = self.GenerateSample()
+
+    self.CheckRDFValue(self.rdfvalue_class(sample), sample)
+
+  def testURNValidation(self):
+    # These should all come out the same: C.00aaeccbb45f33a3
+    test_set = ["C.00aaeccbb45f33a3", "C.00aaeccbb45f33a3".upper(),
+                "c.00aaeccbb45f33a3", "C.00aaeccbb45f33a3 "]
+    results = []
+    for urnstr in test_set:
+      results.append(rdfvalue.ClientURN(urnstr))
+      results.append(rdfvalue.ClientURN("aff4:/%s" % urnstr))
+
+    self.assertEqual(len(results), len(test_set) * 2)
+
+    # Check all are identical
+    self.assertTrue(all([x == results[0] for x in results]))
+
+    # Check we can handle URN as well as string
+    rdfvalue.ClientURN(rdfvalue.ClientURN(test_set[0]))
+
+    error_set = ["B.00aaeccbb45f33a3", "",
+                 "c.00accbb45f33a3", "aff5:/C.00aaeccbb45f33a3"]
+
+    for badurn in error_set:
+      self.assertRaises(type_info.TypeValueError, rdfvalue.ClientURN, badurn)
+
+    self.assertRaises(ValueError, rdfvalue.ClientURN, None)
+
+
+class NetworkAddressTests(test_base.RDFValueTestCase):
+  """Test the NetworkAddress."""
+
+  rdfvalue_class = rdfvalue.NetworkAddress
+
+  def GenerateSample(self, number=0):
+    return rdfvalue.NetworkAddress(
+        human_readable_address="192.168.0.%s" % number)
+
+  def testIPv4(self):
+    sample = rdfvalue.NetworkAddress(human_readable_address="192.168.0.1")
+    self.assertEqual(sample.address_type, rdfvalue.NetworkAddress.Family.INET)
+    self.assertEqual(sample.packed_bytes,
+                     socket.inet_pton(socket.AF_INET, "192.168.0.1"))
+
+    self.assertEqual(sample.human_readable_address,
+                     "192.168.0.1")
+
+    self.CheckRDFValue(self.rdfvalue_class(sample), sample)
+
+  def testIPv6(self):
+    ipv6_addresses = ["fe80::202:b3ff:fe1e:8329", "::1"]
+    for address in ipv6_addresses:
+      sample = rdfvalue.NetworkAddress(human_readable_address=address)
+      self.assertEqual(sample.address_type,
+                       rdfvalue.NetworkAddress.Family.INET6)
+      self.assertEqual(sample.packed_bytes,
+                       socket.inet_pton(socket.AF_INET6, address))
+
+      self.assertEqual(sample.human_readable_address,
+                       address)
+
+      self.CheckRDFValue(self.rdfvalue_class(sample), sample)

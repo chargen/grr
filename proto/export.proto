@@ -28,9 +28,18 @@ message ExportOptions {
       "RDFValues. Note: setting this option to true may require additional "
       "datastore roundtrips and slow down the export process."
     }];
+  repeated string annotations = 4 [(sem_type) = {
+      description: "Annotations to add to exported data. This field can be "
+                   "used to differentiate sets of exported data inside a "
+                   "particular exported type. e.g. data collected by users "
+                   "vs. data collected by cronjob."
+    }];
+
 }
 
 message ExportedMetadata {
+  // Next field ID: 16
+
   optional string client_urn = 1 [(sem_type) = {
       type: "ClientURN",
       description: "Client ID of a client that contains this entry."
@@ -49,7 +58,12 @@ message ExportedMetadata {
 
   optional uint64 timestamp = 10 [(sem_type) = {
       type: "RDFDatetime",
-      description: "When metadata were recorded."
+      description: "When data was exported."
+    }];
+
+  optional uint64 original_timestamp = 15 [(sem_type) = {
+      type: "RDFDatetime",
+      description: "When original data was generated."
     }];
 
   // BEGIN DEPRECATED
@@ -67,13 +81,19 @@ message ExportedMetadata {
       type: "RDFURN",
       description: "URN of a source of exported data."
     }];
-}
 
+  optional string annotations = 14 [(sem_type) = {
+      description: "CSV list of annotations for this data. This field can be "
+                   "used to differentiate sets of exported data inside a "
+                   "particular exported type. e.g. data collected by users "
+                   "vs. data collected by cronjob."
+    }];
+
+}
 
 message ExportedClient {
   optional ExportedMetadata metadata = 1;
 }
-
 
 message ExportedNetworkInterface {
   optional ExportedMetadata metadata = 1;
@@ -82,6 +102,13 @@ message ExportedNetworkInterface {
   optional string ifname = 3;
   optional string ip4_addresses = 4;
   optional string ip6_addresses = 5;
+}
+
+message ExportedDNSClientConfiguration {
+  optional ExportedMetadata metadata = 1;
+
+  optional string dns_servers = 2;
+  optional string dns_suffixes = 3;
 }
 
 message ExportedFile {
@@ -212,29 +239,6 @@ message ExportedOpenFile {
   optional string path = 3;
 }
 
-message ExportedVolatilityHandle {
-  optional ExportedMetadata metadata = 1;
-
-  optional uint64 offset = 2; // position of the value in memory
-  optional uint32 pid = 3; // handler's owner PID
-  optional uint32 handle = 4;
-  optional uint32 access = 5;
-  optional string type = 6; // system handle type, eg: Key or Process
-  optional string path = 7; // details, eg: MACHINE\X\Y
-}
-
-message ExportedVolatilityMutant {
-  optional ExportedMetadata metadata = 1;
-
-  optional uint64 offset = 2; // position of the value in memory
-  optional uint32 ptr_count = 3;
-  optional uint32 handle_count = 4;
-  optional uint32 signal = 5;
-  optional uint64 thread = 6;
-  optional string cid = 7; // 12345678:123
-  optional string name = 8; // named object, eg: XYZLock
-}
-
 message ExportedFileStoreHash {
   optional ExportedMetadata metadata = 1;
 
@@ -244,4 +248,27 @@ message ExportedFileStoreHash {
   optional string target_urn = 5 [(sem_type) = {
       type: "RDFURN",
     }];
+}
+
+message ExportedSoftware {
+  optional ExportedMetadata metadata = 1;
+  optional SoftwarePackage software = 2;
+}
+
+message ExportedMatch {
+  optional ExportedMetadata metadata = 1;
+  optional uint64 offset = 2;
+  optional uint64 length = 3;
+  optional bytes data = 4;
+  optional string urn = 5 [(sem_type) = {
+      type: "RDFURN",
+      description: "The location of this file in the AFF4 space."
+    }];
+}
+
+message ExportedBytes {
+  optional ExportedMetadata metadata = 1;
+
+  optional bytes data = 2;
+  optional uint64 length = 3;
 }

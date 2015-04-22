@@ -33,11 +33,11 @@ class MockVFSHandlerFind(vfs.VFSHandler):
                 "/mock2/directory3": ["file1.txt", "long_file.text"],
                 "/mock2/directory3/file1.txt": "A text file",
                 "/mock2/directory3/long_file.text": ("space " * 100000 +
-                                                     "A Secret"),
-               }
+                                                     "A Secret")}
 
-  def __init__(self, base_fd, pathspec):
-    super(MockVFSHandlerFind, self).__init__(base_fd, pathspec=pathspec)
+  def __init__(self, base_fd, pathspec=None, progress_callback=None):
+    super(MockVFSHandlerFind, self).__init__(
+        base_fd, pathspec=pathspec, progress_callback=progress_callback)
 
     self.pathspec.Append(pathspec)
     self.path = self.pathspec.CollapsePath()
@@ -54,7 +54,7 @@ class MockVFSHandlerFind(vfs.VFSHandler):
     if isinstance(self.content, list):
       raise IOError()
 
-    result = self.content[self.offset:self.offset+length]
+    result = self.content[self.offset:self.offset + length]
     self.offset = min(self.size, self.offset + len(result))
     return result
 
@@ -155,7 +155,7 @@ class FindTest(test_lib.EmptyActionTest):
       request.iterator = result[1].Copy()
 
     for x, y in zip(all_files, files):
-      self.assertProtoEqual(x, y)
+      self.assertRDFValueEqual(x, y)
 
     # Make sure the iterator is finished
     self.assertEqual(request.iterator.state, rdfvalue.Iterator.State.FINISHED)
@@ -459,7 +459,7 @@ class GrepTest(test_lib.EmptyActionTest):
   def testGrepEverywhere(self):
 
     for offset in xrange(500):
-      data = "X" * offset + "HIT" + "X" * (500-offset)
+      data = "X" * offset + "HIT" + "X" * (500 - offset)
       MockVFSHandlerFind.filesystem[self.filename] = data
 
       request = rdfvalue.GrepSpec(
@@ -475,7 +475,7 @@ class GrepTest(test_lib.EmptyActionTest):
       result = self.RunAction("Grep", request)
       self.assertEqual(len(result), 1)
       self.assertEqual(result[0].offset, offset)
-      expected = data[max(0, offset-10):offset+3+10]
+      expected = data[max(0, offset - 10):offset + 3 + 10]
       self.assertEqual(result[0].length, len(expected))
       self.assertEqual(utils.Xor(result[0].data, self.XOR_OUT_KEY),
                        expected)

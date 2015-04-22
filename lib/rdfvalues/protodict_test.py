@@ -13,8 +13,15 @@ an __iter__) method, but are serializable as an RDFProto.
 
 
 
+import collections
+
 from grr.lib import rdfvalue
+from grr.lib.rdfvalues import structs
 from grr.lib.rdfvalues import test_base
+
+
+class TestRDFValueArray(rdfvalue.RDFValueArray):
+  rdf_type = rdfvalue.RDFString
 
 
 class DictTest(test_base.RDFProtoTestCase):
@@ -34,6 +41,10 @@ class DictTest(test_base.RDFProtoTestCase):
     for k, v in test_dict.items():
       # Test access through getitem.
       self.assertEqual(sample[k], v)
+
+  def testIsMapping(self):
+    test_dict = rdfvalue.Dict(a=1)
+    self.assertTrue(isinstance(test_dict, collections.Mapping))
 
   def testDictBehaviour(self):
     tested = rdfvalue.Dict(a=1)
@@ -55,7 +66,8 @@ class DictTest(test_base.RDFProtoTestCase):
         key3=u"\u4f60\u597d",  # Unicode.
         key5=rdfvalue.RDFDatetime("2012/12/11"),  # RDFValue.
         key6=None,             # Support None Encoding.
-        )
+        key7=structs.Enum(5, name="Test"),  # Integer like objects.
+    )
 
     # Initialize through keywords.
     sample = rdfvalue.Dict(**test_dict)
@@ -79,14 +91,65 @@ class DictTest(test_base.RDFProtoTestCase):
     test_dict = dict(
         key1={"A": 1},
         key2=rdfvalue.Dict({"A": 1}),
-        )
+    )
 
     sample = rdfvalue.Dict(**test_dict)
     self.CheckTestDict(test_dict, sample)
     self.CheckTestDict(test_dict, sample.ToDict())
 
-  def testOverwriting(self):
+  def testNestedDictsMultipleTypes(self):
+    test_dict = dict(
+        key1={"A": 1},
+        key2=rdfvalue.Dict({"A": 1}),
+        key3=[1, 2, 3, [1, 2, [3]]],
+        key4=[[], None, ["abc"]]
+    )
 
+    sample = rdfvalue.Dict(**test_dict)
+    self.CheckTestDict(test_dict, sample)
+    self.CheckTestDict(test_dict, sample.ToDict())
+
+  def testNestedDictsOpaqueTypes(self):
+
+    class UnSerializable(object):
+      pass
+
+    test_dict = dict(
+        key1={"A": 1},
+        key2=rdfvalue.Dict({"A": 1}),
+        key3=[1, UnSerializable(), 3, [1, 2, [3]]],
+        key4=[[], None, ["abc"]],
+        key5=UnSerializable(),
+        key6=["a", UnSerializable(), "b"]
+    )
+
+    self.assertRaises(TypeError, rdfvalue.Dict, **test_dict)
+
+    sample = rdfvalue.Dict()
+    for key, value in test_dict.iteritems():
+      sample.SetItem(key, value, raise_on_error=False)
+
+    # Need to do some manual checking here since this is a lossy conversion.
+    self.assertEqual(test_dict["key1"], sample["key1"])
+    self.assertEqual(test_dict["key2"], sample["key2"])
+
+    self.assertEqual(1, sample["key3"][0])
+    self.assertTrue("Unsupported type" in sample["key3"][1])
+    self.assertItemsEqual(test_dict["key3"][2:], sample["key3"][2:])
+
+    self.assertEqual(test_dict["key4"], sample["key4"])
+    self.assertTrue("Unsupported type" in sample["key5"])
+    self.assertEqual("a", sample["key6"][0])
+    self.assertTrue("Unsupported type" in sample["key6"][1])
+    self.assertEqual("b", sample["key6"][2])
+
+  def testBool(self):
+    sample = rdfvalue.Dict(a=True)
+    self.assertTrue(isinstance(sample["a"], bool))
+    sample = rdfvalue.Dict(a="true")
+    self.assertEqual(sample["a"], "true")
+
+  def testOverwriting(self):
     req = rdfvalue.Iterator(client_state=rdfvalue.Dict({"A": 1}))
     # There should be one element now.
     self.assertEqual(len(list(req.client_state.items())), 1)
@@ -99,6 +162,34 @@ class DictTest(test_base.RDFProtoTestCase):
 
     # And now it's gone.
     self.assertEqual(len(list(req.client_state.items())), 0)
+
+
+class AttributedDictTest(test_base.RDFValueTestCase):
+  """Test AttributedDictFile operations."""
+
+  rdfvalue_class = rdfvalue.AttributedDict
+
+  def GenerateSample(self, number=0):
+    return rdfvalue.AttributedDict({"number": number})
+
+  def testInitialize(self):
+    arnie = {"target": "Sarah Connor", "mission": "Protect"}
+    t800 = {"target": "Sarah Connor", "mission": "Terminate"}
+    terminator = rdfvalue.AttributedDict(arnie)
+    self.assertEquals(terminator.GetItem("target"), "Sarah Connor")
+    self.assertEquals(terminator.GetItem("mission"), "Protect")
+    terminator = rdfvalue.AttributedDict(t800)
+    self.assertEquals(terminator.target, "Sarah Connor")
+    self.assertEquals(terminator.mission, "Terminate")
+    # We don't want a conflicted Terminator
+    self.assertFalse(terminator.GetItem("happy_face"))
+    self.assertRaises(AttributeError, terminator.happy_face)
+
+  def testAttributedDictSettingsAreAttr(self):
+    t800 = {"target": "Sarah Connor", "mission": "Terminate"}
+    terminator = rdfvalue.AttributedDict(t800)
+    self.assertEquals(terminator.target, "Sarah Connor")
+    self.assertEquals(terminator.mission, "Terminate")
 
 
 class RDFValueArrayTest(test_base.RDFProtoTestCase):
@@ -142,10 +233,6 @@ class RDFValueArrayTest(test_base.RDFProtoTestCase):
 
   def testEnforcedArray(self):
     """Check that arrays with a forced type are enforced."""
-
-    class TestRDFValueArray(rdfvalue.RDFValueArray):
-      rdf_type = rdfvalue.RDFString
-
     sample = TestRDFValueArray()
 
     # Simple type should be coerced to an RDFString.
@@ -157,9 +244,6 @@ class RDFValueArrayTest(test_base.RDFProtoTestCase):
                       sample.Append, rdfvalue.RDFDatetime().Now())
 
   def testPop(self):
-    class TestRDFValueArray(rdfvalue.RDFValueArray):
-      rdf_type = rdfvalue.RDFString
-
     sample = TestRDFValueArray()
 
     # Simple type should be coerced to an RDFString.
@@ -170,3 +254,25 @@ class RDFValueArrayTest(test_base.RDFProtoTestCase):
     self.assertEqual(sample.Pop(), "hello")
     self.assertEqual(sample.Pop(1), "!")
     self.assertEqual(sample.Pop(), "world")
+
+
+class EmbeddedRDFValueTest(test_base.RDFProtoTestCase):
+  rdfvalue_class = rdfvalue.EmbeddedRDFValue
+
+  def GenerateSample(self, number=0):
+    return rdfvalue.EmbeddedRDFValue(rdfvalue.RDFValueArray([number]))
+
+  def testAgePreserved(self):
+    data = rdfvalue.RDFValueArray([1, 2, 3])
+    now = rdfvalue.RDFDatetime().Now()
+    original_age = data.age.Now()
+
+    self.assertTrue((now - data.age) < rdfvalue.Duration("5s"))
+
+    embedded = rdfvalue.EmbeddedRDFValue(payload=data)
+    self.assertEqual(embedded.payload.age, original_age)
+
+    new_log = rdfvalue.EmbeddedRDFValue(embedded).payload
+    self.assertEqual(new_log.age, original_age, "Age not preserved: %s != %s" %
+                     (new_log.age.AsMicroSecondsFromEpoch(),
+                      original_age.AsMicroSecondsFromEpoch()))

@@ -1,5 +1,4 @@
 #!/usr/bin/env python
-# Copyright 2011 Google Inc. All Rights Reserved.
 """Windows specific utils."""
 
 
@@ -49,7 +48,7 @@ def CanonicalPathToLocalPath(path):
   path = path.replace("/", "\\")
   m = re.match(r"\\([a-zA-Z]):(.*)$", path)
   if m:
-    path = "%s:\\%s" % (m.group(1), m.group(2))
+    path = "%s:\\%s" % (m.group(1), m.group(2).lstrip("\\"))
 
   return path
 
@@ -158,7 +157,7 @@ def WinFindProxies():
           # Per-protocol settings
           for p in proxy_server.split(";"):
             protocol, address = p.split("=", 1)
-                  # See if address has a type:// prefix
+            # See if address has a type:// prefix
 
             if not re.match("^([^/:]+)://", address):
               address = "%s://%s" % (protocol, address)
@@ -208,7 +207,9 @@ def WinGetRawDevice(path):
     raise IOError("No mountpoint for path: %s", path)
 
   if not path.startswith(mount_point):
-    raise IOError("path %s is not mounted under %s?" % (path, mount_point))
+    stripped_mp = mount_point.rstrip("\\")
+    if not path.startswith(stripped_mp):
+      raise IOError("path %s is not mounted under %s" % (path, mount_point))
 
   corrected_path = LocalPathToCanonicalPath(path[len(mount_point):])
   corrected_path = utils.NormalizePath(corrected_path)

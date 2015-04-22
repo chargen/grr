@@ -55,7 +55,7 @@ def InstallerNotifyServer():
 
   client.EstablishConnection()
   client.client_worker.SendReply(
-      session_id="W:InstallationFailed",
+      session_id=rdfvalue.FlowSessionID(flow_name="InstallationFailed"),
       message_type=rdfvalue.GrrMessage.Type.STATUS,
       request_id=0, response_id=0,
       rdf_value=rdfvalue.GrrStatus(

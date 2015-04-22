@@ -48,6 +48,15 @@ message KnowledgeBaseUser {
         "c:\\Documents and Settings\\foo\\Desktop",
     }];
 
+  optional uint64 last_logon = 5 [(sem_type) = {
+      type: "RDFDatetime",
+      description: "The last logon time for this user."
+    }];
+
+  optional string full_name = 6 [(sem_type) = {
+      description: "Full name of the user."
+    }];
+
   // Windows specific values.
   optional string userdomain = 10 [(sem_type) = {
       description: "The domain name of the user. E.g. MICROSOFT.",
@@ -70,7 +79,7 @@ message KnowledgeBaseUser {
 
   optional string localappdata = 15 [(sem_type) = {
       description: "The %LOCALAPPDATA% directory of the user as reported by the"
-        " system. E.g. AppData\\Local\\Microsoft\\Windows",
+        " system. E.g. c:\\Documents and Settings\\foo\\AppData\\Local",
     }];
 
   optional string internet_cache = 16 [(sem_type) = {
@@ -168,6 +177,15 @@ message KnowledgeBase {
     }];
 
   //
+  // Linux specific distribution information.
+  // See: lsb_release(1) man page, or the LSB Specification under the 'Command
+  // Behaviour' section.
+  //
+  optional string os_release = 9 [(sem_type) = {
+      description: "Linux distribution name.",
+    }];
+
+  //
   // Windows specific system level parameters.
   //
   optional string environ_systemroot = 20 [(sem_type) = {
@@ -194,11 +212,6 @@ message KnowledgeBase {
         "the system, e.g. C:",
     }];
 
-  optional string environ_system = 25 [(sem_type) = {
-      description: "The value of the %System% parameter. As returned by "
-        "the system, e.g. C:\\windows\\system32",
-    }];
-
   optional string environ_allusersprofile = 26 [(sem_type) = {
       description: "The value of the %AllUsersProfile% parameter. As returned "
         "by the system, e.g. c:\\Documents and Settings\\All Users",
@@ -212,12 +225,7 @@ message KnowledgeBase {
 
   optional string current_control_set = 28 [(sem_type) = {
       description: "The current value of the system CurrentControlSet "
-        "e.g. ControlSet001",
-    }];
-
-  optional string sys_registry = 29 [(sem_type) = {
-      description: "The directory containing the system registry files. "
-        "E.g. c:\\windows\\system32\\config.",
+        "e.g. HKEY_LOCAL_MACHINE\\SYSTEM\\ControlSet001",
     }];
 
   optional string code_page = 30 [(sem_type) = {

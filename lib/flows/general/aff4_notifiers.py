@@ -15,7 +15,7 @@ class AFF4NotificationEmailListener(flow.EventListener):
   EVENTS = ["AFF4ChangeNotifyByEmail"]
 
   well_known_session_id = rdfvalue.SessionID(
-      "aff4:/flows/W:AFF4ChangeNotifyByEmailHandler")
+      flow_name="AFF4ChangeNotifyByEmailHandler")
 
   mail_template = """<html><body><h1>AFF4 change notification</h1>
 Following path got modified: %(path)s"

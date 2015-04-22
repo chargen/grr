@@ -1,0 +1,42 @@
+// Configuration files.
+syntax = "proto2";
+
+import "grr/proto/jobs.proto";
+import "grr/proto/semantic.proto";
+
+
+
+// NFS configuration files.
+message NfsClient {
+  optional string host = 1;
+  repeated string options = 2;
+}
+
+message NfsExport {
+  optional string share = 1;
+  repeated string defaults = 2;
+  repeated NfsClient clients = 3;
+}
+
+
+// An sshd match block configuration. This is a subcomponent of an sshd config.
+message SshdMatchBlock {
+  optional string criterion = 1 [(sem_type) = {
+      description: "Criteria that trigger a match block."
+    }];
+  optional AttributedDict config = 2 [(sem_type) = {
+      description: "The configuration of the match block."
+    }];
+}
+
+
+// A sshd configuration containing the sshd settings, and any number of match
+// groups.
+message SshdConfig {
+  optional AttributedDict config = 1 [(sem_type) = {
+      description: "The main sshd configuration."
+    }];
+  repeated SshdMatchBlock matches = 2 [(sem_type) = {
+      description: "Match block sections."
+    }];
+}

@@ -2,8 +2,6 @@
 """Tests for the access control mechanisms."""
 
 
-import time
-
 # pylint: disable=unused-import,g-bad-import-order
 from grr.lib import server_plugins
 # pylint: enable=unused-import,g-bad-import-order
@@ -61,7 +59,7 @@ class AccessControlTest(test_lib.GRRBaseTest):
     approval_request.Close()
 
     if admin:
-      self.MakeUserAdmin("Approver1")
+      self.CreateAdminUser("Approver1")
 
   def CreateSampleHunt(self):
     """Creats SampleHunt, writes it to the data store and returns it's id."""
@@ -120,10 +118,7 @@ class AccessControlTest(test_lib.GRRBaseTest):
     urn = rdfvalue.ClientURN("C.%016X" % 0).Add("/fs/os/c")
     self.assertRaises(access_control.UnauthorizedAccess, aff4.FACTORY.Open, urn)
 
-    old_time = time.time
-    try:
-      time.time = lambda: 100
-
+    with test_lib.FakeTime(100):
       # Token expires in 5 seconds.
       super_token = access_control.ACLToken(username="test", expiry=105)
       super_token.supervisor = True
@@ -131,14 +126,12 @@ class AccessControlTest(test_lib.GRRBaseTest):
       # This should work since token is a super token.
       aff4.FACTORY.Open(urn, mode="rw", token=super_token)
 
-      # Change the time to 200
-      time.time = lambda: 200
+    # Change the time to 200
+    with test_lib.FakeTime(200):
 
       # Should be expired now.
       self.assertRaises(access_control.ExpiryError, aff4.FACTORY.Open, urn,
                         token=super_token, mode="rw")
-    finally:
-      time.time = old_time
 
   def testApprovalExpiry(self):
     """Tests that approvals expire after the correct time."""
@@ -149,26 +142,24 @@ class AccessControlTest(test_lib.GRRBaseTest):
     self.assertRaises(access_control.UnauthorizedAccess, aff4.FACTORY.Open, urn,
                       None, "rw", token)
 
-    with test_lib.Stubber(time, "time", lambda: 100.0):
+    with test_lib.FakeTime(100.0, increment=1e-3):
       self.GrantClientApproval(client_id, token)
 
       # This should work now.
       aff4.FACTORY.Open(urn, mode="rw", token=token)
 
     # 3 weeks later.
-    with test_lib.Stubber(time, "time", lambda: 100.0 + 3 * 7 * 24 * 60 * 60):
+    with test_lib.FakeTime(100.0 + 3 * 7 * 24 * 60 * 60):
       # This should still work.
       aff4.FACTORY.Open(urn, mode="rw", token=token)
 
     # Getting close.
-    with test_lib.Stubber(time, "time",
-                          lambda: 100.0 + 4 * 7 * 24 * 60 * 60 - 100.0):
+    with test_lib.FakeTime(100.0 + 4 * 7 * 24 * 60 * 60 - 100.0):
       # This should still work.
       aff4.FACTORY.Open(urn, mode="rw", token=token)
 
-      # Over 4 weeks now.
-    with test_lib.Stubber(time, "time",
-                          lambda: 100.0 + 4 * 7 * 24 * 60 * 60 + 100.0):
+    # Over 4 weeks now.
+    with test_lib.FakeTime(100.0 + 4 * 7 * 24 * 60 * 60 + 100.0):
       self.assertRaises(access_control.UnauthorizedAccess,
                         aff4.FACTORY.Open, urn, None, "rw", token)
 
@@ -198,7 +189,7 @@ class AccessControlTest(test_lib.GRRBaseTest):
     hunt_urn = self.CreateSampleHunt()
     self.assertRaisesRegexp(
         access_control.UnauthorizedAccess,
-        "No approval found for hunt",
+        "No approval found for",
         flow.GRRFlow.StartFlow,
         flow_name="StartHuntFlow", token=token, hunt_urn=hunt_urn)
 
@@ -231,9 +222,9 @@ class AccessControlTest(test_lib.GRRBaseTest):
     labels = aff4.FACTORY.Open(label_urn, mode="rw", token=token)
 
     # But we cannot write to them.
-    l = labels.Schema.LABEL()
-    l.Append("admin")
-    labels.Set(labels.Schema.LABEL, l)
+    l = labels.Schema.LABELS()
+    l.AddLabel(rdfvalue.AFF4ObjectLabel(name="admin", owner="GRR"))
+    labels.Set(labels.Schema.LABELS, l)
     self.assertRaises(access_control.UnauthorizedAccess, labels.Close)
 
   def testForemanAccess(self):
@@ -241,14 +232,6 @@ class AccessControlTest(test_lib.GRRBaseTest):
     token = access_control.ACLToken(username="test", reason="For testing")
     self.assertRaises(access_control.UnauthorizedAccess,
                       aff4.FACTORY.Open, "aff4:/foreman", token=token)
-
-    # Make sure the user themselves can not create the labels object.
-    with self.assertRaises(access_control.UnauthorizedAccess):
-      with aff4.FACTORY.Create("aff4:/users/test/labels", "AFF4Object",
-                               token=token) as fd:
-        label = fd.Schema.LABEL()
-        label.Append("admin")
-        fd.Set(label)
 
     # We need a supervisor to manipulate a user's ACL token:
     super_token = access_control.ACLToken(username="test")
@@ -258,7 +241,7 @@ class AccessControlTest(test_lib.GRRBaseTest):
     with aff4.FACTORY.Create("aff4:/users/test", "GRRUser",
                              token=super_token) as fd:
 
-      fd.SetLabels("admin")
+      fd.SetLabels("admin", owner="GRR")
 
     # Now we are allowed.
     aff4.FACTORY.Open("aff4:/foreman", token=token)
@@ -290,7 +273,7 @@ class AccessControlTest(test_lib.GRRBaseTest):
   def testFlowAccess(self):
     """Tests access to flows."""
     token = access_control.ACLToken(username="test", reason="For testing")
-    client_id = "C." + "A" * 16
+    client_id = "C." + "a" * 16
 
     self.assertRaises(access_control.UnauthorizedAccess, flow.GRRFlow.StartFlow,
                       client_id=client_id, flow_name="SendingFlow",
@@ -327,7 +310,7 @@ class AccessControlTest(test_lib.GRRBaseTest):
     """Makes sure that results are cached in the security manager."""
 
     token = access_control.ACLToken(username="test", reason="For testing")
-    client_id = "C." + "B" * 16
+    client_id = "C." + "b" * 16
 
     self.GrantClientApproval(client_id, token)
 
@@ -375,7 +358,7 @@ class AccessControlTest(test_lib.GRRBaseTest):
       email["subject"] = subject
       email["message"] = message
 
-    with test_lib.Stubber(email_alerts, "SendEmail", SendEmail):
+    with utils.Stubber(email_alerts, "SendEmail", SendEmail):
       flow.GRRFlow.StartFlow(
           client_id=client_id, flow_name="BreakGlassGrantClientApprovalFlow",
           token=self.token, reason=self.token.reason)
@@ -395,14 +378,53 @@ class AccessControlTest(test_lib.GRRBaseTest):
     # Make sure the token is tagged as an emergency token:
     self.assertEqual(self.token.is_emergency, True)
 
+  def testValidateToken(self):
+    token = access_control.ACLToken(username="test", reason="For testing")
+    access_manager = access_control.BasicAccessControlManager()
+    access_manager.ValidateToken(token, "aff4:/C.0000000000000001")
 
-class AccessControlTestLoader(test_lib.GRRTestLoader):
-  base_class = AccessControlTest
+    with self.assertRaises(access_control.UnauthorizedAccess):
+      access_manager.ValidateToken(None, "aff4:/C.0000000000000001")
+
+    token = access_control.ACLToken(reason="For testing")
+    with self.assertRaises(access_control.UnauthorizedAccess):
+      access_manager.ValidateToken(token, "aff4:/C.0000000000000001")
+
+  def testValidateRequestedAccess(self):
+    access_manager = access_control.BasicAccessControlManager()
+    access_manager.ValidateRequestedAccess("r", "aff4:/C.0000000000000001")
+
+    with self.assertRaises(access_control.UnauthorizedAccess):
+      access_manager.ValidateRequestedAccess("", "aff4:/C.0000000000000001")
+
+    with self.assertRaises(access_control.UnauthorizedAccess):
+      access_manager.ValidateRequestedAccess("q", "aff4:/C.0000000000000001")
+
+  def testCheckACL(self):
+    access_manager = access_control.FullAccessControlManager()
+
+    # Supervisor can do anything
+    token = access_control.ACLToken(username="unknown", supervisor=True)
+    self.assertTrue(access_manager.CheckACL(token, "aff4:/C.0000000000000001"))
+
+    # No target should raise
+    token = access_control.ACLToken(username="unknown")
+    with self.assertRaises(access_control.UnauthorizedAccess):
+      access_manager.CheckACL(token, "")
+
+    # Unless it is a system user
+    token = access_control.ACLToken(username="GRRSystem", reason="bcause")
+    self.assertTrue(access_manager.CheckACL(token, None))
+
+    # No reason should raise
+    token = access_control.ACLToken(username="unknown")
+    with self.assertRaises(access_control.UnauthorizedAccess):
+      access_manager.CheckACL(token, "aff4:/C.0000000000000001")
 
 
 def main(argv):
   # Run the full test suite
-  test_lib.GrrTestProgram(argv=argv, testLoader=AccessControlTestLoader())
+  test_lib.GrrTestProgram(argv=argv)
 
 if __name__ == "__main__":
   flags.StartMain(main)

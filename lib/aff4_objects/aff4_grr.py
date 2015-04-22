@@ -3,7 +3,6 @@
 
 
 import re
-import StringIO
 import time
 
 
@@ -44,6 +43,9 @@ class VersionString(rdfvalue.RDFString):
 
 class VFSGRRClient(standard.VFSDirectory):
   """A Remote client."""
+
+  # URN of the index for client labels.
+  labels_index_urn = rdfvalue.RDFURN("aff4:/index/labels/clients")
 
   class SchemaCls(standard.VFSDirectory.SchemaCls):
     """The schema for the client."""
@@ -99,10 +101,6 @@ class VFSGRRClient(standard.VFSDirectory):
                                     rdfvalue.KnowledgeBase,
                                     "Artifact Knowledge Base", "KnowledgeBase")
 
-    # Deprecated for new clients - DO NOT USE.
-    GRR_CONFIG = aff4.Attribute("aff4:client_config", rdfvalue.GRRConfig,
-                                "Running configuration for the GRR client.")
-
     GRR_CONFIGURATION = aff4.Attribute(
         "aff4:client_configuration", rdfvalue.Dict,
         "Running configuration for the GRR client.", "Config")
@@ -120,6 +118,14 @@ class VFSGRRClient(standard.VFSDirectory):
     MAC_ADDRESS = aff4.Attribute("aff4:mac_addresses", rdfvalue.RDFString,
                                  "A hex encoded MAC address.", "MAC",
                                  index=client_index)
+
+    KERNEL = aff4.Attribute("aff4:kernel_version", rdfvalue.RDFString,
+                            "Kernel version string.", "KernelVersion")
+
+    # Same for IP addresses.
+    HOST_IPS = aff4.Attribute("aff4:host_ips", rdfvalue.RDFString,
+                              "An IP address.", "Host_ip",
+                              index=client_index)
 
     PING = aff4.Attribute("metadata:ping", rdfvalue.RDFDatetime,
                           "The last time the server heard from this client.",
@@ -139,19 +145,48 @@ class VFSGRRClient(standard.VFSDirectory):
         "aff4:last_foreman_time", rdfvalue.RDFDatetime,
         "The last time the foreman checked us.", versioned=False)
 
-    SUMMARY = aff4.Attribute(
-        "aff4:summary", rdfvalue.ClientSummary,
-        "A summary of this client", versioned=False)
+    LAST_INTERFACES = aff4.Attribute(
+        "aff4:last_interfaces", rdfvalue.Interfaces,
+        "Last seen network interfaces. Full history is maintained in the "
+        "clientid/network object. Separated for performance reasons.",
+        versioned=False)
+
+    LAST_CRASH = aff4.Attribute(
+        "aff4:last_crash", rdfvalue.ClientCrash,
+        "Last client crash.", creates_new_object_version=False,
+        versioned=False)
+
+    VOLUMES = aff4.Attribute(
+        "aff4:volumes", rdfvalue.Volumes,
+        "Client disk volumes.")
+
+    HARDWARE_INFO = aff4.Attribute(
+        "aff4:hardware_info", rdfvalue.HardwareInfo,
+        "Various hardware information.", default="")
 
   # Valid client ids
   CLIENT_ID_RE = re.compile(r"^C\.[0-9a-fA-F]{16}$")
+
+  @property
+  def age(self):
+    """RDFDatetime at which the object was created."""
+    # TODO(user) move up to AFF4Object after some analysis of how .age is
+    # used in the codebase.
+    aff4_type = self.Get(self.Schema.TYPE)
+
+    if aff4_type:
+      return aff4_type.age
+    else:
+      # If there is no type attribute yet, we have only just been created and
+      # not flushed yet, so just set timestamp to now.
+      return rdfvalue.RDFDatetime().Now()
 
   def Initialize(self):
     # Our URN must be a valid client.id.
     self.client_id = rdfvalue.ClientURN(self.urn)
 
   def Update(self, attribute=None, priority=None):
-    if attribute == self.Schema.CONTAINS:
+    if attribute == "CONTAINS":
       flow_id = flow.GRRFlow.StartFlow(client_id=self.client_id,
                                        flow_name="Interrogate",
                                        token=self.token, priority=priority)
@@ -165,6 +200,10 @@ class VFSGRRClient(standard.VFSDirectory):
                    rdfvalue.PathSpec.PathType.TSK: "/fs/tsk",
                    rdfvalue.PathSpec.PathType.REGISTRY: "/registry",
                    rdfvalue.PathSpec.PathType.MEMORY: "/devices/memory"}
+
+  @staticmethod
+  def ClientURNFromURN(urn):
+    return rdfvalue.ClientURN(rdfvalue.RDFURN(urn).Split()[0])
 
   @staticmethod
   def PathspecToURN(pathspec, client_urn):
@@ -233,21 +272,29 @@ class VFSGRRClient(standard.VFSDirectory):
     return client_urn.Add("/".join(result))
 
   def GetSummary(self):
-    """Gets a client summary object."""
-    summary = self.Get(self.Schema.SUMMARY)
-    if summary is None:
-      summary = rdfvalue.ClientSummary(client_id=self.urn)
-      summary.system_info.node = self.Get(self.Schema.HOSTNAME)
-      summary.system_info.system = self.Get(self.Schema.SYSTEM)
-      summary.system_info.release = self.Get(self.Schema.OS_RELEASE)
-      summary.system_info.version = str(self.Get(self.Schema.OS_VERSION, ""))
-      summary.system_info.fqdn = self.Get(self.Schema.FQDN)
-      summary.system_info.machine = self.Get(self.Schema.ARCH)
-      summary.system_info.install_date = self.Get(self.Schema.INSTALL_DATE)
+    """Gets a client summary object.
 
-      summary.users = self.Get(self.Schema.USER)
-      summary.interfaces = self.Get(self.Schema.INTERFACES)
-      summary.client_info = self.Get(self.Schema.CLIENT_INFO)
+    Returns:
+      rdfvalue.ClientSummary
+    """
+    self.max_age = 0
+    summary = rdfvalue.ClientSummary(client_id=self.urn)
+    summary.system_info.node = self.Get(self.Schema.HOSTNAME)
+    summary.system_info.system = self.Get(self.Schema.SYSTEM)
+    summary.system_info.release = self.Get(self.Schema.OS_RELEASE)
+    summary.system_info.version = str(self.Get(self.Schema.OS_VERSION, ""))
+    summary.system_info.kernel = self.Get(self.Schema.KERNEL)
+    summary.system_info.fqdn = self.Get(self.Schema.FQDN)
+    summary.system_info.machine = self.Get(self.Schema.ARCH)
+    summary.system_info.install_date = self.Get(
+        self.Schema.INSTALL_DATE)
+    summary.users = self.Get(self.Schema.USER)
+    summary.interfaces = self.Get(self.Schema.LAST_INTERFACES)
+    summary.client_info = self.Get(self.Schema.CLIENT_INFO)
+    summary.serial_number = self.Get(self.Schema.HARDWARE_INFO).serial_number
+    summary.timestamp = self.age
+    summary.system_manufacturer = self.Get(
+        self.Schema.HARDWARE_INFO).system_manufacturer
 
     return summary
 
@@ -298,7 +345,8 @@ class VFSFile(aff4.AFF4Image):
 
     FINGERPRINT = aff4.Attribute("aff4:fingerprint",
                                  rdfvalue.FingerprintResponse,
-                                 "Protodict containing arrays of hashes.")
+                                 "DEPRECATED protodict containing arrays of "
+                                 " hashes. Use AFF4Stream.HASH instead.")
 
   def Update(self, attribute=None, priority=None):
     """Update an attribute from the client."""
@@ -317,19 +365,17 @@ class VFSFile(aff4.AFF4Image):
 
     # Get the pathspec for this object
     pathspec = self.Get(self.Schema.STAT).pathspec
-    flow_urn = flow.GRRFlow.StartFlow(client_id=client_id,
-                                      flow_name="GetFile", token=self.token,
-                                      pathspec=pathspec, priority=priority)
+    flow_urn = flow.GRRFlow.StartFlow(
+        client_id=client_id, flow_name="MultiGetFile", token=self.token,
+        pathspecs=[pathspec], priority=priority)
     self.Set(self.Schema.CONTENT_LOCK(flow_urn))
     self.Close()
 
     return flow_urn
 
 
-class MemoryImage(VFSFile):
+class MemoryImage(standard.VFSDirectory):
   """The server representation of the client's memory device."""
-
-  _behaviours = frozenset(["Container"])
 
   class SchemaCls(VFSFile.SchemaCls):
     LAYOUT = aff4.Attribute("aff4:memory/geometry", rdfvalue.MemoryInformation,
@@ -354,39 +400,6 @@ class VFSAnalysisFile(VFSFile):
 
   def Update(self, attribute=None):
     pass
-
-
-class GRRSignedBlob(aff4.AFF4MemoryStream):
-  """A container for storing a signed binary blob such as a driver."""
-
-  class SchemaCls(aff4.AFF4MemoryStream.SchemaCls):
-    """Signed blob attributes."""
-
-    BINARY = aff4.Attribute("aff4:signed_blob", rdfvalue.SignedBlob,
-                            "Signed blob proto for deployment to clients."
-                            "This is used for signing drivers, binaries "
-                            "and python code.")
-
-  def Initialize(self):
-    contents = ""
-    if "r" in self.mode:
-      contents = self.Get(self.Schema.BINARY)
-      if contents:
-        contents = contents.data
-
-    self.fd = StringIO.StringIO(contents)
-    self.size = self.fd.len
-
-
-class GRRMemoryDriver(GRRSignedBlob):
-  """A driver for acquiring memory."""
-
-  class SchemaCls(GRRSignedBlob.SchemaCls):
-    INSTALLATION = aff4.Attribute(
-        "aff4:driver/installation", rdfvalue.DriverInstallTemplate,
-        "The driver installation control protobuf.", "installation",
-        default=rdfvalue.DriverInstallTemplate(
-            driver_name="pmem", device_path=r"\\.\pmem"))
 
 
 class GRRForeman(aff4.AFF4Object):
@@ -414,12 +427,10 @@ class GRRForeman(aff4.AFF4Object):
 
     if expired_session_ids:
       # Notify the worker to mark this hunt as terminated.
-      priorities = dict()
-      for session_id in expired_session_ids:
-        priorities[session_id] = rdfvalue.GrrMessage.Priority.MEDIUM_PRIORITY
-
       manager = queue_manager.QueueManager(token=self.token)
-      manager.MultiNotifyQueue(list(expired_session_ids), priorities)
+      manager.MultiNotifyQueue(
+          [rdfvalue.GrrNotification(session_id=session_id)
+           for session_id in expired_session_ids])
 
     if len(new_rules) < len(rules):
       self.Set(self.Schema.RULES, new_rules)
@@ -504,7 +515,7 @@ class GRRForeman(aff4.AFF4Object):
                          action.hunt_id, client_id)
 
             flow_cls = flow.GRRFlow.classes[action.hunt_name]
-            flow_cls.StartClient(action.hunt_id, client_id)
+            flow_cls.StartClients(action.hunt_id, [client_id])
             actions_count += 1
         else:
           flow.GRRFlow.StartFlow(
@@ -591,7 +602,7 @@ class GRRAFF4Init(registry.InitHook):
   """Ensure critical AFF4 objects exist for GRR."""
 
   # Must run after the AFF4 subsystem is ready.
-  pre = ["AFF4InitHook", "ACLInit"]
+  pre = ["AFF4InitHook"]
 
   def Run(self):
     try:
@@ -602,11 +613,6 @@ class GRRAFF4Init(registry.InitHook):
     except access_control.UnauthorizedAccess:
       pass
 
-# We add these attributes to all objects. This means that every object we create
-# has a URN link back to the flow that created it.
-aff4.AFF4Object.SchemaCls.FLOW = aff4.Attribute(
-    "aff4:flow", rdfvalue.RDFURN, "A currently scheduled flow.")
-
 
 class AFF4CollectionView(rdfvalue.RDFValueArray):
   """A view specifies how an AFF4Collection is seen."""
@@ -614,19 +620,6 @@ class AFF4CollectionView(rdfvalue.RDFValueArray):
 
 class RDFValueCollectionView(rdfvalue.RDFValueArray):
   """A view specifies how an RDFValueCollection is seen."""
-
-
-class VolatilityResponse(aff4.AFF4Volume):
-  _behaviours = frozenset(["Collection"])
-
-  class SchemaCls(standard.VFSDirectory.SchemaCls):
-
-    DESCRIPTION = aff4.Attribute("aff4:description", rdfvalue.RDFString,
-                                 "This collection's description", "description")
-
-    RESULT = aff4.Attribute("aff4:volatility_result",
-                            rdfvalue.VolatilityResult,
-                            "The result returned by the flow.")
 
 
 class MRUCollection(aff4.AFF4Object):
@@ -740,3 +733,34 @@ class VFSBlobImage(aff4.BlobImage, aff4.VFSFile):
 
   class SchemaCls(aff4.BlobImage.SchemaCls, aff4.VFSFile.SchemaCls):
     pass
+
+
+class AFF4RekallProfile(aff4.AFF4MemoryStream):
+  """A Rekall profile in the AFF4 namespace."""
+
+  class SchemaCls(aff4.AFF4MemoryStream.SchemaCls):
+    PROFILE = aff4.Attribute("aff4:profile", rdfvalue.RekallProfile,
+                             "A Rekall profile.")
+
+
+# The catchall client label used when compiling server-side stats about clients
+# by label.
+ALL_CLIENTS_LABEL = "All"
+
+
+def GetAllClientLabels(token, include_catchall=False):
+  """Get the set of all label names applied to all clients.
+
+  Args:
+    token: token to use when opening the index.
+    include_catchall: If true, we include ALL_CLIENTS_LABEL in the results.
+
+  Returns:
+    set of label name strings, including the catchall "All"
+  """
+  labels_index = aff4.FACTORY.Create(VFSGRRClient.labels_index_urn,
+                                     "AFF4LabelsIndex", mode="rw", token=token)
+  labels = set(labels_index.ListUsedLabelNames(owner="GRR"))
+  if include_catchall:
+    labels.add(ALL_CLIENTS_LABEL)
+  return labels

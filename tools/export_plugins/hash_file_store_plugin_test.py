@@ -9,17 +9,18 @@ import os
 from grr.lib import server_plugins
 # pylint: enable=unused-import, g-bad-import-order
 
+from grr.lib import action_mocks
 from grr.lib import aff4
 from grr.lib import data_store
 from grr.lib import flags
 from grr.lib import flow
+from grr.lib import output_plugin
 from grr.lib import rdfvalue
 from grr.lib import test_lib
-from grr.lib.hunts import output_plugins
 from grr.tools.export_plugins import hash_file_store_plugin
 
 
-class DummyOutputPlugin(output_plugins.HuntOutputPlugin):
+class DummyOutputPlugin(output_plugin.OutputPlugin):
   name = "dummy"
 
   responses = []
@@ -47,8 +48,8 @@ class HashFileStoreExportPluginTest(test_lib.GRRBaseTest):
                     pathtype=rdfvalue.PathSpec.PathType.TSK)
     urn = aff4.AFF4Object.VFSGRRClient.PathspecToURN(pathspec, self.client_id)
 
-    client_mock = test_lib.ActionMock("TransferBuffer", "StatFile",
-                                      "HashBuffer")
+    client_mock = action_mocks.ActionMock("TransferBuffer", "StatFile",
+                                          "HashBuffer")
     for _ in test_lib.TestFlowHelper(
         "GetFile", client_mock, token=self.token,
         client_id=self.client_id, pathspec=pathspec):
@@ -70,7 +71,7 @@ class HashFileStoreExportPluginTest(test_lib.GRRBaseTest):
         "--threads",
         "0",
         "dummy"
-        ]))
+    ]))
 
     responses = DummyOutputPlugin.responses
 

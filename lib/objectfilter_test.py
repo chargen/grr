@@ -18,11 +18,13 @@ filename = "boot.ini"
 
 
 class DummyObject(object):
+
   def __init__(self, key, value):
     setattr(self, key, value)
 
 
 class HashObject(object):
+
   def __init__(self, hash_value=None):
     self.value = hash_value
 
@@ -38,6 +40,7 @@ class HashObject(object):
 
 
 class Dll(object):
+
   def __init__(self, name, imported_functions=None, exported_functions=None):
     self.name = name
     self._imported_functions = imported_functions or []
@@ -76,6 +79,11 @@ class DummyFile(object):
     return [HashObject(hash1), HashObject(hash2)]
 
   @property
+  def mapping(self):
+    return {"hashes": [HashObject(hash1), HashObject(hash2)],
+            "nested": {"attrs": [attr1, attr2]}}
+
+  @property
   def size(self):
     return 10
 
@@ -101,6 +109,7 @@ class DummyFile(object):
 
 
 class ObjectFilterTest(unittest.TestCase):
+
   def setUp(self):
     self.file = DummyFile()
     self.filter_imp = objectfilter.LowercaseAttributeFilterImplementation
@@ -114,7 +123,7 @@ class ObjectFilterTest(unittest.TestCase):
           (False, ["size", 0]),
           (False, ["float", 1.0]),
           (True, ["float", 123.9824]),
-          ],
+      ],
       objectfilter.LessEqual: [
           (True, ["size", 1000]),
           (True, ["size", 11]),
@@ -122,7 +131,7 @@ class ObjectFilterTest(unittest.TestCase):
           (False, ["size", 9]),
           (False, ["float", 1.0]),
           (True, ["float", 123.9823]),
-          ],
+      ],
       objectfilter.Greater: [
           (True, ["size", 1]),
           (True, ["size", 9.23]),
@@ -130,7 +139,7 @@ class ObjectFilterTest(unittest.TestCase):
           (False, ["size", 1000]),
           (True, ["float", 122]),
           (True, ["float", 1.0]),
-          ],
+      ],
       objectfilter.GreaterEqual: [
           (False, ["size", 1000]),
           (False, ["size", 11]),
@@ -141,7 +150,7 @@ class ObjectFilterTest(unittest.TestCase):
           (True, ["float", 123.9823]),
           # Comparisons works with strings, although it might be a bit silly
           (True, ["name", "aoot.ini"]),
-          ],
+      ],
       objectfilter.Contains: [
           # Contains works with strings
           (True, ["name", "boot.ini"]),
@@ -151,22 +160,22 @@ class ObjectFilterTest(unittest.TestCase):
           (True, ["imported_dlls.imported_functions", "FindWindow"]),
           # But not with numbers
           (False, ["size", 12]),
-          ],
+      ],
       objectfilter.NotContains: [
           (False, ["name", "boot.ini"]),
           (False, ["name", "boot"]),
           (True, ["name", "meh"]),
-          ],
+      ],
       objectfilter.Equals: [
           (True, ["name", "boot.ini"]),
           (False, ["name", "foobar"]),
           (True, ["float", 123.9823]),
-          ],
+      ],
       objectfilter.NotEquals: [
           (False, ["name", "boot.ini"]),
           (True, ["name", "foobar"]),
           (True, ["float", 25]),
-          ],
+      ],
       objectfilter.InSet: [
           (True, ["name", ["boot.ini", "autoexec.bat"]]),
           (True, ["name", "boot.ini"]),
@@ -175,12 +184,12 @@ class ObjectFilterTest(unittest.TestCase):
           (True, ["attributes", ["Archive", "Backup", "Nonexisting"]]),
           # Not all values of attributes are within these
           (False, ["attributes", ["Executable", "Sparse"]]),
-          ],
+      ],
       objectfilter.NotInSet: [
           (False, ["name", ["boot.ini", "autoexec.bat"]]),
           (False, ["name", "boot.ini"]),
           (True, ["name", "NOPE"]),
-          ],
+      ],
       objectfilter.Regexp: [
           (True, ["name", "^boot.ini$"]),
           (True, ["name", "boot.ini"]),
@@ -190,8 +199,8 @@ class ObjectFilterTest(unittest.TestCase):
           (True, ["size", 0]),
           # But regexp doesn't work with lists or generators for the moment
           (False, ["imported_dlls.imported_functions", "FindWindow"])
-          ],
-      }
+      ],
+  }
 
   def testBinaryOperators(self):
     for operator, test_data in self.operator_tests.items():
@@ -225,6 +234,12 @@ class ObjectFilterTest(unittest.TestCase):
                                           "non_callable_repeated.desmond")
     self.assertListEqual(list(values), [["brotha", "brotha"],
                                         ["brotha", "sista"]])
+
+    # Existing, repeated, leaf is mapping.
+    values = self.value_expander().Expand(self.file, "mapping.hashes")
+    self.assertListEqual(list(values), [hash1, hash2])
+    values = self.value_expander().Expand(self.file, "mapping.nested.attrs")
+    self.assertListEqual(list(values), [[attr1, attr2]])
 
     # Now with an iterator
     values = self.value_expander().Expand(self.file, "deferred_values")
@@ -285,16 +300,16 @@ class ObjectFilterTest(unittest.TestCase):
                       objectfilter.Context,
                       arguments=["context"],
                       value_expander=self.value_expander)
-    self.assertRaises(objectfilter.InvalidNumberOfOperands,
-                      objectfilter.Context,
-                      arguments=
-                      ["context",
-                       objectfilter.Equals(arguments=["path", "value"],
-                                           value_expander=self.value_expander),
-                       objectfilter.Equals(arguments=["another_path", "value"],
-                                           value_expander=self.value_expander)
-                      ],
-                      value_expander=self.value_expander)
+    self.assertRaises(
+        objectfilter.InvalidNumberOfOperands, objectfilter.Context,
+        arguments=["context",
+                   objectfilter.Equals(
+                       arguments=["path", "value"],
+                       value_expander=self.value_expander),
+                   objectfilter.Equals(
+                       arguments=["another_path", "value"],
+                       value_expander=self.value_expander)],
+        value_expander=self.value_expander)
     # "One imported_dll imports 2 functions AND one imported_dll imports
     # function RegQueryValueEx"
     arguments = [
@@ -358,7 +373,7 @@ class ObjectFilterTest(unittest.TestCase):
     parser = objectfilter.Parser(r"a is '\\'").Parse()
     self.assertEqual(parser.args[0], "\\")
 
-    ## HEX ESCAPING
+    # HEX ESCAPING
     # This fails as it's not really a hex escaped string
     parser = objectfilter.Parser(r"a is '\xJZ'")
     self.assertRaises(objectfilter.ParseError, parser.Parse)

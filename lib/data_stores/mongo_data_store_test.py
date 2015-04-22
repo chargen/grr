@@ -15,10 +15,14 @@ from grr.lib import flags
 from grr.lib import test_lib
 from grr.lib.data_stores import mongo_data_store
 
+# pylint: mode=test
+
 
 class MongoTestMixin(object):
+  """A mixin for Mongo tests."""
 
-  def InitTable(self):
+  def InitDatastore(self):
+    """Initializes the data store."""
     self.token = access_control.ACLToken(username="test",
                                          reason="Running tests")
     config_lib.CONFIG.Set("Mongo.db_name", "grr_test_%s" %
@@ -26,20 +30,20 @@ class MongoTestMixin(object):
     data_store.DB = mongo_data_store.MongoDataStore()
     data_store.DB.security_manager = test_lib.MockSecurityManager()
 
+    self.DestroyDatastore()
+
+  def DestroyDatastore(self):
     # Drop the collection.
     data_store.DB.db_handle.drop_collection(data_store.DB.latest_collection)
     data_store.DB.db_handle.drop_collection(data_store.DB.versioned_collection)
 
   def testCorrectDataStore(self):
+    """Makes sure the correct implementation is tested."""
     self.assertTrue(isinstance(data_store.DB, mongo_data_store.MongoDataStore))
 
 
-class MongoDataStoreTest(MongoTestMixin, data_store_test.DataStoreTest):
+class MongoDataStoreTest(MongoTestMixin, data_store_test._DataStoreTest):
   """Test the mongo data store abstraction."""
-
-  def setUp(self):
-    super(MongoDataStoreTest, self).setUp()
-    self.InitTable()
 
 
 class MongoDataStoreBenchmarks(MongoTestMixin,
@@ -50,9 +54,10 @@ class MongoDataStoreBenchmarks(MongoTestMixin,
   # 500 is standard for other data stores.
   files_per_dir = 50
 
-  def setUp(self):
-    super(MongoDataStoreBenchmarks, self).setUp()
-    self.InitTable()
+
+class MongoDataStoreCSVBenchmarks(MongoTestMixin,
+                                  data_store_test.DataStoreCSVBenchmarks):
+  """Benchmark the mongo data store abstraction."""
 
 
 def main(args):

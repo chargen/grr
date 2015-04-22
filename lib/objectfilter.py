@@ -92,8 +92,10 @@ filter is easy. Three basic filter implementations are given:
 
 import abc
 import binascii
-import logging
+import collections
 import re
+
+import logging
 
 from grr.lib import lexer
 from grr.lib import utils
@@ -185,6 +187,7 @@ class Operator(Filter):
 
 
 class IdentityFilter(Operator):
+
   def Matches(self, _):
     return True
 
@@ -295,7 +298,12 @@ class Contains(GenericBinaryOperator):
   """Whether the right operand is contained in the value."""
 
   def Operation(self, x, y):
-    return y in x
+    # Assuming x is iterable, check if it contains y.
+    # Otherwise, check if x and y are equal.
+    try:
+      return y in x
+    except TypeError:
+      return y == x
 
 
 class NotContains(GenericBinaryOperator):
@@ -447,8 +455,7 @@ OP2FN = {"equals": Equals,
          "<=": LessEqual,
          "inset": InSet,
          "notinset": NotInSet,
-         "regexp": Regexp,
-        }
+         "regexp": Regexp}
 
 
 class ValueExpander(object):
@@ -475,10 +482,13 @@ class ValueExpander(object):
   def _AtNonLeaf(self, attr_value, path):
     """Called when at a non-leaf value. Should recurse and yield values."""
     try:
-      # Check first for iterables
-      # If it's a dictionary, we yield it
-      if isinstance(attr_value, dict):
-        yield attr_value
+      # If it's dictionary-like, yield the attribute of the dict.
+      if isinstance(attr_value, (dict, collections.Mapping)):
+        sub_obj = attr_value.get(path[1])
+        if len(path) > 2:
+          sub_obj = self.Expand(sub_obj, path[2:])
+        for value in sub_obj:
+          yield value
       else:
         # If it's an iterable, we recurse on each value.
         for sub_obj in attr_value:
@@ -526,6 +536,8 @@ class AttributeValueExpander(ValueExpander):
   """An expander that gives values based on object attribute names."""
 
   def _GetValue(self, obj, attr_name):
+    if isinstance(obj, collections.Mapping):
+      return obj.get(attr_name)
     return getattr(obj, attr_name, None)
 
 
@@ -543,8 +555,9 @@ class DictValueExpander(ValueExpander):
     return obj.get(attr_name, None)
 
 
-### PARSER DEFINITION
+# PARSER DEFINITION
 class BasicExpression(lexer.Expression):
+
   def Compile(self, filter_implementation):
     arguments = [self.attribute]
     op_str = self.operator.lower()
@@ -586,6 +599,7 @@ class ContextExpression(lexer.Expression):
 
 
 class BinaryExpression(lexer.BinaryExpression):
+
   def Compile(self, filter_implemention):
     """Compile the binary expression into a filter object."""
     operator = self.operator.lower()
@@ -601,6 +615,7 @@ class BinaryExpression(lexer.BinaryExpression):
 
 
 class IdentityExpression(lexer.Expression):
+
   def Compile(self, filter_implementation):
     return filter_implementation.FILTERS["IdentityFilter"]()
 
@@ -661,7 +676,7 @@ class Parser(lexer.SearchParser):
 
       # Skip whitespace.
       lexer.Token(".", r"\s+", None, None),
-      ]
+  ]
 
   def InsertArg(self, string="", **_):
     """Insert an arg to the current expression."""
@@ -763,35 +778,35 @@ class Parser(lexer.SearchParser):
         self.buffer))
 
   def _CombineBinaryExpressions(self, operator):
-    for i in range(1, len(self.stack)-1):
+    for i in range(1, len(self.stack) - 1):
       item = self.stack[i]
       if (isinstance(item, lexer.BinaryExpression) and
           item.operator.lower() == operator.lower() and
-          isinstance(self.stack[i-1], lexer.Expression) and
-          isinstance(self.stack[i+1], lexer.Expression)):
-        lhs = self.stack[i-1]
-        rhs = self.stack[i+1]
+          isinstance(self.stack[i - 1], lexer.Expression) and
+          isinstance(self.stack[i + 1], lexer.Expression)):
+        lhs = self.stack[i - 1]
+        rhs = self.stack[i + 1]
 
         self.stack[i].AddOperands(lhs, rhs)
-        self.stack[i-1] = None
-        self.stack[i+1] = None
+        self.stack[i - 1] = None
+        self.stack[i + 1] = None
 
     self.stack = filter(None, self.stack)
 
   def _CombineContext(self):
     # Context can merge from item 0
-    for i in range(len(self.stack)-1, 0, -1):
-      item = self.stack[i-1]
+    for i in range(len(self.stack) - 1, 0, -1):
+      item = self.stack[i - 1]
       if (isinstance(item, ContextExpression) and
           isinstance(self.stack[i], lexer.Expression)):
         expression = self.stack[i]
-        self.stack[i-1].SetExpression(expression)
+        self.stack[i - 1].SetExpression(expression)
         self.stack[i] = None
 
     self.stack = filter(None, self.stack)
 
 
-### FILTER IMPLEMENTATIONS
+# FILTER IMPLEMENTATIONS
 
 
 class BaseFilterImplementation(object):

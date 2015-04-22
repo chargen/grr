@@ -1,7 +1,7 @@
 { "name": "TestDrivers",
-  "collectors": [
-    { "action": "WMIQuery",
-      "args": { "query": "SELECT * from Win32_SystemDriver"
+  "sources": [
+    { "type": "WMI",
+      "attributes": { "query": "SELECT * from Win32_SystemDriver"
       },
       "conditions": [],
       "returned_types": []

@@ -1,7 +1,13 @@
 #!/usr/bin/env python
-# Copyright 2013 Google Inc. All Rights Reserved.
 """Tests for Windows Volume Shadow Copy flow."""
+import stat
+
+# pylint: disable=unused-import, g-bad-import-order
+from grr.lib import server_plugins
+# pylint: enable=unused-import, g-bad-import-order
+
 from grr.lib import aff4
+from grr.lib import flags
 from grr.lib import rdfvalue
 from grr.lib import test_lib
 
@@ -48,6 +54,7 @@ class TestClient(object):
     return [rdfvalue.Dict(**self._RESPONSES)]
 
   def ListDirectory(self, list_directory_request):
+    """A mock list directory."""
     pathspec = list_directory_request.pathspec
     if not pathspec:
       raise RuntimeError("Missing pathspec.")
@@ -67,7 +74,8 @@ class TestClient(object):
     for i in range(10):
       mock_pathspec = pathspec.Copy()
       mock_pathspec.last.path = "/file %s" % i
-      result.append(rdfvalue.StatEntry(pathspec=mock_pathspec))
+      result.append(rdfvalue.StatEntry(pathspec=mock_pathspec,
+                                       st_mode=stat.S_IFDIR))
 
     return result
 
@@ -93,3 +101,11 @@ class TestListVolumeShadowCopies(test_lib.FlowTestsBaseclass):
     self.assertEqual(len(children), 10)
     self.assertEqual([x.Basename() for x in sorted(children)],
                      ["file %s" % i for i in range(10)])
+
+
+def main(argv):
+  # Run the full test suite
+  test_lib.GrrTestProgram(argv=argv)
+
+if __name__ == "__main__":
+  flags.StartMain(main)

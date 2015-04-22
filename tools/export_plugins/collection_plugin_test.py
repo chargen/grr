@@ -15,6 +15,7 @@ from grr.lib import email_alerts
 from grr.lib import flags
 from grr.lib import rdfvalue
 from grr.lib import test_lib
+from grr.lib import utils
 from grr.tools.export_plugins import collection_plugin
 
 
@@ -48,24 +49,25 @@ class CollectionExportPluginTest(test_lib.GRRBaseTest):
                                       title=title, message=message))
 
     email_address = "notify@%s" % config_lib.CONFIG["Logging.domain"]
-    with test_lib.Stubber(email_alerts, "SendEmail", SendEmail):
+    with utils.Stubber(email_alerts, "SendEmail", SendEmail):
       self.email_messages = []
 
       plugin.Run(parser.parse_args(args=[
           "--path",
           "aff4:/testcoll",
           "email",
-          "--email",
+          "--email_address",
           email_address,
-          "--email_limit",
+          "--emails_limit",
           "100"]))
 
     self.assertEqual(len(self.email_messages), 1)
     for msg in self.email_messages:
       self.assertEqual(msg["address"], email_address)
-      self.assertEqual("GRR Hunt results collection aff4:/testcoll got a new "
-                       "result.", msg["title"])
-      self.assertTrue("testfile" in msg["message"])
+      self.assertEqual("GRR got a new result in aff4:/testcoll.", msg["title"])
+      self.assertTrue("GRR got a new result in aff4:/testcoll" in
+                      msg["message"])
+      self.assertTrue("(Host-0)" in msg["message"])
 
 
 def main(argv):

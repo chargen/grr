@@ -10,6 +10,7 @@ import time
 
 
 from grr.client.client_actions import standard
+from grr.lib import action_mocks
 from grr.lib import config_lib
 from grr.lib import flags
 from grr.lib import rdfvalue
@@ -37,6 +38,71 @@ class TestExecutePython(test_lib.EmptyActionTest):
     self.assertTrue(result.time_used > 0)
     self.assertEqual(result.return_val, "")
     self.assertEqual(utils.TEST_VAL, "modified")
+
+  def testExecutePythonEnvironment(self):
+    """Test the basic ExecutePython action."""
+
+    python_code = """
+import StringIO
+import uu
+
+def decode(encoded):
+  # Use the import (uu) inside a function. This will fail if the environment
+  # for exec is not set up properly.
+  i = StringIO.StringIO(s)
+  o = StringIO.StringIO()
+  uu.decode(i, o)
+  return o.getvalue()
+
+s = "626567696e20363636202d0a2c3226354c3b265c4035565d523b2630410a200a656e640a"
+s = s.decode("hex")
+
+magic_return_str = decode(s)
+"""
+    signed_blob = rdfvalue.SignedBlob()
+    signed_blob.Sign(python_code, self.signing_key)
+    request = rdfvalue.ExecutePythonRequest(python_code=signed_blob)
+    result = self.RunAction("ExecutePython", request)[0]
+
+    self.assertTrue(result.time_used > 0)
+    self.assertEqual(result.return_val, "Hello World!")
+
+  def testStdoutHooking(self):
+    python_code = """
+
+def f(n):
+    print "F called:", n
+
+print "Calling f."
+f(1)
+print "Done."
+"""
+    signed_blob = rdfvalue.SignedBlob()
+    signed_blob.Sign(python_code, self.signing_key)
+    request = rdfvalue.ExecutePythonRequest(python_code=signed_blob)
+    result = self.RunAction("ExecutePython", request)[0]
+
+    self.assertTrue(result.time_used > 0)
+    self.assertEqual(result.return_val, "Calling f.\nF called: 1\nDone.\n")
+
+  def testProgress(self):
+    python_code = """
+
+def f():
+    # This should also work inside a function.
+    Progress()
+
+f()
+Progress()
+print "Done."
+"""
+    signed_blob = rdfvalue.SignedBlob()
+    signed_blob.Sign(python_code, self.signing_key)
+    request = rdfvalue.ExecutePythonRequest(python_code=signed_blob)
+    result = self.RunAction("ExecutePython", request)[0]
+
+    self.assertTrue(result.time_used > 0)
+    self.assertEqual(result.return_val, "Done.\n")
 
   def testExecuteModifiedPython(self):
     """Test that rejects invalid ExecutePython action."""
@@ -211,8 +277,8 @@ class TestNetworkByteLimits(test_lib.EmptyActionTest):
     self.buffer_ref = rdfvalue.BufferReference(pathspec=pathspec, length=5000)
     self.data = "X" * 500
     self.old_read = standard.vfs.ReadVFS
-    standard.vfs.ReadVFS = lambda x, y, z: self.data
-    self.transfer_buf = test_lib.ActionMock("TransferBuffer")
+    standard.vfs.ReadVFS = lambda x, y, z, progress_callback=None: self.data
+    self.transfer_buf = action_mocks.ActionMock("TransferBuffer")
 
   def testTransferNetworkByteLimitError(self):
     message = rdfvalue.GrrMessage(name="TransferBuffer",

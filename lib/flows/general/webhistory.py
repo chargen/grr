@@ -1,11 +1,11 @@
 #!/usr/bin/env python
-# Copyright 2011 Google Inc. All Rights Reserved.
 """Flow to recover history files."""
 
 
-## DISABLED for now until it gets converted to artifacts.
+# DISABLED for now until it gets converted to artifacts.
 
 import datetime
+import os
 
 from grr.lib import aff4
 from grr.lib import flow
@@ -55,7 +55,7 @@ class ChromeHistory(flow.GRRFlow):
     if self.state.args.history_path:
       self.state.history_paths.append(self.state.args.history_path)
 
-    if self.runner.output:
+    if self.runner.output is not None:
       self.runner.output = aff4.FACTORY.Create(
           self.runner.output.urn, "VFSAnalysisFile", token=self.token)
 
@@ -72,13 +72,13 @@ class ChromeHistory(flow.GRRFlow):
 
     for path in self.state.history_paths:
       for fname in filenames:
-        findspec = rdfvalue.FindSpec(
-            max_depth=1, path_regex="^{0}$".format(fname),
-            pathspec=rdfvalue.PathSpec(pathtype=self.state.args.pathtype,
-                                       path=path))
-
-        self.CallFlow("FetchFiles", findspec=findspec,
-                      next_state="ParseFiles")
+        self.CallFlow(
+            "FileFinder",
+            paths=[os.path.join(path, fname)],
+            pathtype=self.state.args.pathtype,
+            action=rdfvalue.FileFinderAction(
+                action_type=rdfvalue.FileFinderAction.Action.DOWNLOAD),
+            next_state="ParseFiles")
 
   @flow.StateHandler()
   def ParseFiles(self, responses):
@@ -87,20 +87,21 @@ class ChromeHistory(flow.GRRFlow):
     # exist, e.g. Chromium on most machines, so we don't check for success.
     if responses:
       for response in responses:
-        fd = aff4.FACTORY.Open(response.aff4path, token=self.token)
+        fd = aff4.FACTORY.Open(response.stat_entry.aff4path, token=self.token)
         hist = chrome_history.ChromeParser(fd)
         count = 0
         for epoch64, dtype, url, dat1, dat2, dat3 in hist.Parse():
           count += 1
           str_entry = "%s %s %s %s %s %s" % (
-              datetime.datetime.utcfromtimestamp(epoch64/1e6), url,
+              datetime.datetime.utcfromtimestamp(epoch64 / 1e6), url,
               dat1, dat2, dat3, dtype)
 
-          if self.runner.output:
+          if self.runner.output is not None:
             self.runner.output.write(utils.SmartStr(str_entry) + "\n")
 
         self.Log("Wrote %d Chrome History entries for user %s from %s", count,
-                 self.state.args.username, response.pathspec.Basename())
+                 self.state.args.username,
+                 response.stat_entry.pathspec.Basename())
         self.state.hist_count += count
 
   def GuessHistoryPaths(self, username):
@@ -185,37 +186,37 @@ class FirefoxHistory(flow.GRRFlow):
       if not self.state.history_paths:
         raise flow.FlowError("Could not find valid History paths.")
 
-    if self.runner.output:
+    if self.runner.output is not None:
       self.runner.output = aff4.FACTORY.Create(
           self.runner.output.urn, "VFSAnalysisFile", token=self.token)
 
     filename = "places.sqlite"
     for path in self.state.history_paths:
-      findspec = rdfvalue.FindSpec(max_depth=2, path_regex="^%s$" % filename)
-
-      findspec.pathspec.path = path
-      findspec.pathspec.pathtype = self.args.pathtype
-
-      self.CallFlow("FetchFiles", findspec=findspec,
-                    next_state="ParseFiles")
+      self.CallFlow(
+          "FileFinder",
+          paths=[os.path.join(path, "**2", filename)],
+          pathtype=self.state.args.pathtype,
+          action=rdfvalue.FileFinderAction(
+              action_type=rdfvalue.FileFinderAction.Action.DOWNLOAD),
+          next_state="ParseFiles")
 
   @flow.StateHandler()
   def ParseFiles(self, responses):
     """Take each file we retrieved and get the history from it."""
     if responses:
       for response in responses:
-        fd = aff4.FACTORY.Open(response.aff4path, token=self.token)
+        fd = aff4.FACTORY.Open(response.stat_entry.aff4path, token=self.token)
         hist = firefox3_history.Firefox3History(fd)
         count = 0
         for epoch64, dtype, url, dat1, in hist.Parse():
           count += 1
           str_entry = "%s %s %s %s" % (
-              datetime.datetime.utcfromtimestamp(epoch64/1e6), url,
+              datetime.datetime.utcfromtimestamp(epoch64 / 1e6), url,
               dat1, dtype)
-          if self.runner.output:
+          if self.runner.output is not None:
             self.runner.output.write(utils.SmartStr(str_entry) + "\n")
         self.Log("Wrote %d Firefox History entries for user %s from %s", count,
-                 self.args.username, response.pathspec.Basename())
+                 self.args.username, response.stat_entry.pathspec.Basename())
         self.state.hist_count += count
 
   def GuessHistoryPaths(self, username):
@@ -266,8 +267,7 @@ BROWSER_PATHS = {
         "Firefox": ["{local_app_data}\\Mozilla\\Firefox\\Profiles\\"],
         "IE": ["{cache}\\",
                "{cache}\\Low\\",
-               "{app_data}\\Microsoft\\Windows\\",
-              ]
+               "{app_data}\\Microsoft\\Windows\\"]
     },
     "Darwin": {
         "Firefox": ["{homedir}/Library/Application Support/Firefox/Profiles/"],
@@ -323,7 +323,7 @@ class CacheGrep(flow.GRRFlow):
   def StartRequests(self):
     """Generate and send the Find requests."""
     client = aff4.FACTORY.Open(self.client_id, token=self.token)
-    if self.runner.output:
+    if self.runner.output is not None:
       self.runner.output.Set(
           self.runner.output.Schema.DESCRIPTION("CacheGrep for {0}".format(
               self.args.data_regex)))
@@ -331,16 +331,23 @@ class CacheGrep(flow.GRRFlow):
     usernames = ["%s\\%s" % (u.domain, u.username) for u in self.state.users]
     usernames = [u.lstrip("\\") for u in usernames]  # Strip \\ if no domain.
 
+    condition = rdfvalue.FileFinderCondition(
+        condition_type=rdfvalue.FileFinderCondition.Type.CONTENTS_REGEX_MATCH,
+        contents_regex_match=rdfvalue.FileFinderContentsRegexMatchCondition(
+            regex=self.args.data_regex,
+            mode=rdfvalue.FileFinderContentsRegexMatchCondition.Mode.FIRST_HIT))
+
     for path in self.state.all_paths:
       full_paths = flow_utils.InterpolatePath(path, client, users=usernames)
       for full_path in full_paths:
-        findspec = rdfvalue.FindSpec(data_regex=self.args.data_regex)
-        findspec.iterator.number = 800
-        findspec.pathspec.path = full_path
-        findspec.pathspec.pathtype = self.args.pathtype
-
-        self.CallFlow("FetchFiles", findspec=findspec,
-                      next_state="HandleResults")
+        self.CallFlow(
+            "FileFinder",
+            paths=[os.path.join(full_path, "**5")],
+            pathtype=self.state.args.pathtype,
+            conditions=[condition],
+            action=rdfvalue.FileFinderAction(
+                action_type=rdfvalue.FileFinderAction.Action.DOWNLOAD),
+            next_state="HandleResults")
 
   @flow.StateHandler()
   def HandleResults(self, responses):
@@ -348,4 +355,4 @@ class CacheGrep(flow.GRRFlow):
     # Note that some of these Find requests will fail because some paths don't
     # exist, e.g. Chromium on most machines, so we don't check for success.
     for response in responses:
-      self.SendReply(response)
+      self.SendReply(response.stat_entry)

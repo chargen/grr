@@ -1,6 +1,7 @@
 #!/usr/bin/env python
 """Tests for grr.parsers.windows_persistence."""
 
+from grr.lib import flags
 from grr.lib import rdfvalue
 from grr.lib import test_lib
 from grr.parsers import windows_persistence
@@ -8,7 +9,7 @@ from grr.parsers import windows_persistence
 
 class WindowsPersistenceMechanismsParserTest(test_lib.FlowTestsBaseclass):
 
-  def testParseMultiple(self):
+  def testParse(self):
     parser = windows_persistence.WindowsPersistenceMechanismsParser()
     path = (r"HKEY_LOCAL_MACHINE\Software\Microsoft\Windows\CurrentVersion"
             r"\Run\test")
@@ -28,10 +29,11 @@ class WindowsPersistenceMechanismsParserTest(test_lib.FlowTestsBaseclass):
                               "/HKEY_LOCAL_MACHINE/SYSTEM/ControlSet001"
                               "/services/AcpiPmi")
     for path in image_paths:
-      persistence.append(rdfvalue.ServiceInformation(name="blah",
+      serv_info = rdfvalue.WindowsServiceInformation(name="blah",
                                                      display_name="GRRservice",
                                                      image_path=path,
-                                                     registry_key=reg_key))
+                                                     registry_key=reg_key)
+      persistence.append(serv_info)
 
     knowledge_base = rdfvalue.KnowledgeBase()
     knowledge_base.environ_systemroot = "C:\\Windows"
@@ -47,3 +49,10 @@ class WindowsPersistenceMechanismsParserTest(test_lib.FlowTestsBaseclass):
       self.assertEqual(results[0].pathspec.path, expected[index])
       self.assertEqual(len(results), 1)
 
+
+def main(argv):
+  test_lib.main(argv)
+
+
+if __name__ == "__main__":
+  flags.StartMain(main)

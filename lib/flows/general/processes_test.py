@@ -3,18 +3,21 @@
 
 import os
 
+from grr.lib import action_mocks
 from grr.lib import aff4
+from grr.lib import flags
 from grr.lib import flow
 from grr.lib import rdfvalue
 from grr.lib import test_lib
 
 
-class ListProcessesMock(test_lib.ActionMock):
+class ListProcessesMock(action_mocks.ActionMock):
   """Client with real file actions and mocked-out ListProcesses."""
 
   def __init__(self, processes_list):
     super(ListProcessesMock, self).__init__("TransferBuffer", "StatFile",
-                                            "Find", "HashBuffer", "HashFile")
+                                            "Find", "HashBuffer",
+                                            "FingerprintFile")
     self.processes_list = processes_list
 
   def ListProcesses(self, _):
@@ -148,5 +151,9 @@ class ListProcessesTest(test_lib.FlowTestsBaseclass):
     self.assertEqual(binaries[0].pathspec.path, process1.exe)
 
 
-class GetProcessesBinariesTest(test_lib.FlowTestsBaseclass):
-  """Test the get processes binaries flow."""
+def main(argv):
+  # Run the full test suite
+  test_lib.GrrTestProgram(argv=argv)
+
+if __name__ == "__main__":
+  flags.StartMain(main)

@@ -89,14 +89,13 @@ server.nfs:/vol/home /home/user nfs rw,nosuid,relatime 0 0
 
     testdata = [(r"C:\Windows", "\\\\?\\Volume{11111}", "/Windows"),
                 (r"C:\\Windows\\", "\\\\?\\Volume{11111}", "/Windows"),
-                (r"C:\\", "\\\\?\\Volume{11111}", "/"),
-               ]
+                (r"C:\\", "\\\\?\\Volume{11111}", "/")]
 
     for filename, expected_device, expected_path in testdata:
       raw_pathspec, path = client_utils_windows.WinGetRawDevice(filename)
 
       # Pathspec paths are always absolute and therefore must have a leading /.
-      self.assertEqual("/" + expected_device, raw_pathspec.path)
+      self.assertEqual(expected_device, raw_pathspec.path)
       self.assertEqual(expected_path, path)
 
   def SetupWinEnvironment(self):
@@ -208,7 +207,8 @@ server.nfs:/vol/home /home/user nfs rw,nosuid,relatime 0 0
       grr_message = rdfvalue.GrrMessage(session_id="W:test")
 
       nanny_controller.WriteTransactionLog(grr_message)
-      self.assertProtoEqual(grr_message, nanny_controller.GetTransactionLog())
+      self.assertRDFValueEqual(grr_message,
+                               nanny_controller.GetTransactionLog())
       nanny_controller.CleanTransactionLog()
 
       self.assert_(nanny_controller.GetTransactionLog() is None)

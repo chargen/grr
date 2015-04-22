@@ -1,7 +1,6 @@
 #!/usr/bin/env python
 # -*- mode: python; encoding: utf-8 -*-
 #
-# Copyright 2012 Google Inc. All Rights Reserved.
 
 """This is the interface for managing cron jobs."""
 
@@ -76,19 +75,23 @@ class CronTable(renderers.TableRenderer):
 
   layout_template = """
 <div id="enable_cron_job_dialog_{{unique|escape}}"
-  class="modal hide" tabindex="-1" role="dialog" aria-hidden="true">
+  class="modal" tabindex="-1" role="dialog" aria-hidden="true">
 </div>
 
 <div id="disable_cron_job_dialog_{{unique|escape}}"
-  class="modal hide" tabindex="-1" role="dialog" aria-hidden="true">
+  class="modal" tabindex="-1" role="dialog" aria-hidden="true">
 </div>
 
 <div id="delete_cron_job_dialog_{{unique|escape}}"
-  class="modal hide" tabindex="-1" role="dialog" aria-hidden="true">
+  class="modal" tabindex="-1" role="dialog" aria-hidden="true">
+</div>
+
+<div id="run_cron_job_dialog_{{unique|escape}}"
+  class="modal" tabindex="-1" role="dialog" aria-hidden="true">
 </div>
 
 <div id="schedule_hunt_cron_job_dialog_{{unique|escape}}"
-  class="modal wide-modal high-modal hide" update_on_show="true"
+  class="modal wide-modal high-modal" update_on_show="true"
   tabindex="-1" role="dialog" aria-hidden="true">
 </div>
 
@@ -96,7 +99,7 @@ class CronTable(renderers.TableRenderer):
   <li>
   <div class="btn-group">
   <button id='schedule_hunt_cron_job_{{unique|escape}}' title='Schedule Hunt'
-    class="btn" name="ScheduleHuntCronJob" data-toggle="modal"
+    class="btn btn-default" name="ScheduleHuntCronJob" data-toggle="modal"
     data-target="#schedule_hunt_cron_job_dialog_{{unique|escape}}"
     >
       <img src='/static/images/new.png' class='toolbar_icon'>
@@ -105,15 +108,23 @@ class CronTable(renderers.TableRenderer):
 
   <div class="btn-group">
   <button id='enable_cron_job_{{unique|escape}}' title='Enable Cron Job'
-    class="btn" name="EnableCronJob" data-toggle="modal"
+    class="btn btn-default" name="EnableCronJob" data-toggle="modal"
     data-target="#enable_cron_job_dialog_{{unique|escape}}"
     disabled="true"
     >
       <img src='/static/images/play_button.png' class='toolbar_icon'>
   </button>
 
+  <button id='run_cron_job_{{unique|escape}}' title='Force Run Cron Job'
+    class="btn btn-default" name="RunCronJob" data-toggle="modal"
+    data-target="#run_cron_job_dialog_{{unique|escape}}"
+    disabled="true"
+    >
+      <img src='/static/images/play_force_button.png' class='toolbar_icon'>
+  </button>
+
   <button id='disable_cron_job_{{unique|escape}}' title='Disable Cron Job'
-    class="btn" name="DisableCronJob" data-toggle="modal"
+    class="btn btn-default" name="DisableCronJob" data-toggle="modal"
     data-target="#disable_cron_job_dialog_{{unique|escape}}"
     disabled="true"
     >
@@ -123,7 +134,7 @@ class CronTable(renderers.TableRenderer):
 
   <div class="btn-group">
   <button id='delete_cron_job_{{unique|escape}}' title='Delete Cron Job'
-    class="btn" name="DeleteCronJob" data-toggle="modal"
+    class="btn btn-default" name="DeleteCronJob" data-toggle="modal"
     data-target="#delete_cron_job_dialog_{{unique|escape}}"
     disabled="true"
     >
@@ -178,9 +189,9 @@ class CronTable(renderers.TableRenderer):
         cron_jobs_urns[start_row:end_row], aff4_type="CronJob",
         token=request.token, age=aff4.ALL_TIMES)
 
-    for i, cron_job in enumerate(cron_jobs):
+    for i, cron_job in enumerate(sorted(cron_jobs)):
       if self.IsCronJobFailing(cron_job):
-        self.SetRowClass(i + start_row, "error")
+        self.SetRowClass(i + start_row, "danger")
       elif self.IsCronJobStuck(cron_job):
         self.SetRowClass(i + start_row, "warning")
 
@@ -189,11 +200,11 @@ class CronTable(renderers.TableRenderer):
         self.AddCell(i + start_row, "State",
                      cron_job.Get(cron_job.Schema.DISABLED, False))
 
-        self.AddCell(i+start_row, "Name", cron_job.urn)
-        self.AddCell(i+start_row, "Last Run",
+        self.AddCell(i + start_row, "Name", cron_job.urn)
+        self.AddCell(i + start_row, "Last Run",
                      cron_job.Get(cron_job.Schema.LAST_RUN_TIME))
-        self.AddCell(i+start_row, "Frequency", cron_args.periodicity)
-        self.AddCell(i+start_row, "Description", cron_args.description)
+        self.AddCell(i + start_row, "Frequency", cron_args.periodicity)
+        self.AddCell(i + start_row, "Description", cron_args.description)
 
 
 class CronJobManagementTabs(renderers.TabLayout):
@@ -278,20 +289,29 @@ successfully!</p>
 
 
 class DisableCronJobConfirmationDialog(CronJobManagementConfirmationDialog):
-  """Dialog that asks confirmation to disable a cron job."""
+  """Dialog that asks for confirmation to disable a cron job."""
 
   action_name = rdfvalue.ManageCronJobFlowArgs.Action.DISABLE
 
 
 class EnableCronJobConfirmationDialog(CronJobManagementConfirmationDialog):
-  """Dialog that asks confirmation to enable a cron job."""
+  """Dialog that asks for confirmation to enable a cron job."""
 
   action_name = rdfvalue.ManageCronJobFlowArgs.Action.ENABLE
 
 
 class DeleteCronJobConfirmationDialog(CronJobManagementConfirmationDialog):
-  """Dialog that asks confirmation to delete a cron job."""
+  """Dialog that asks for confirmation to delete a cron job."""
   action_name = rdfvalue.ManageCronJobFlowArgs.Action.DELETE
+
+
+class ForceRunCronJobConfirmationDialog(CronJobManagementConfirmationDialog):
+  """Dialog that asks for confirmation to force a cron job run.
+
+  This action can be run at any time regardless of whether the cronjob is
+  enabled or disabled.
+  """
+  action_name = rdfvalue.ManageCronJobFlowArgs.Action.RUN
 
 
 class CronConfigureSchedule(renderers.TemplateRenderer):
@@ -314,7 +334,7 @@ class CronConfigureSchedule(renderers.TemplateRenderer):
 
   def Layout(self, request, response):
     cron_args = rdfvalue.CreateCronJobFlowArgs()
-    cron_args.flow_runner_args.flow_name = "CreateGenericHuntFlow"
+    cron_args.flow_runner_args.flow_name = "CreateAndRunGenericHuntFlow"
 
     self.cron_form = forms.SemanticProtoFormRenderer(
         cron_args, id=self.id,
@@ -325,16 +345,19 @@ class CronConfigureSchedule(renderers.TemplateRenderer):
 
 
 class CronHuntParser(new_hunt.HuntArgsParser):
+
   def ParseCronParameters(self):
-    cron_parmeters = forms.SemanticProtoFormRenderer(
+    params = forms.SemanticProtoFormRenderer(
         rdfvalue.CreateCronJobFlowArgs(), prefix="cron").ParseArgs(
             self.request)
 
-    cron_parmeters.flow_runner_args.flow_name = "CreateGenericHuntFlow"
-    cron_parmeters.flow_args.hunt_runner_args = self.ParseHuntRunnerArgs()
-    cron_parmeters.flow_args.hunt_args = self.ParseHuntArgs()
+    params.flow_runner_args.flow_name = "CreateAndRunGenericHuntFlow"
+    params.flow_args.hunt_runner_args = self.ParseHuntRunnerArgs()
+    params.flow_args.hunt_runner_args.description = ("%s Cron" %
+                                                     params.description)
+    params.flow_args.hunt_args = self.ParseHuntArgs()
 
-    return cron_parmeters
+    return params
 
 
 class CronReview(new_hunt.HuntInformation):
@@ -406,7 +429,7 @@ class ScheduleHuntCronJobDialog(wizards.WizardRenderer):
       CronConfigureSchedule,
       CronReview,
       CronSchedule,
-      ]
+  ]
 
   def Layout(self, request, response):
     response = super(ScheduleHuntCronJobDialog, self).Layout(request, response)

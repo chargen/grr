@@ -8,29 +8,6 @@ from grr.lib import stats as stats_lib
 from grr.lib import utils
 
 from grr.lib.aff4_objects import cronjobs
-from grr.lib.rdfvalues import stats
-
-
-class FilestoreStats(aff4.AFF4Object):
-  """AFF4 object for storing filestore statistics."""
-
-  class SchemaCls(aff4.AFF4Object.SchemaCls):
-    """SchemaCls."""
-    FILESTORE_FILETYPES = aff4.Attribute(
-        "aff4:stats/filestore/filetypes", stats.Graph,
-        "Number of files in the filestore by type")
-
-    FILESTORE_FILETYPES_SIZE = aff4.Attribute(
-        "aff4:stats/filestore/filetypes_size", stats.GraphFloat,
-        "Total filesize in GB of files in the filestore by type")
-
-    FILESTORE_FILESIZE_HISTOGRAM = aff4.Attribute(
-        "aff4:stats/filestore/filesize", stats.Graph,
-        "Filesize histogram of files in the filestore")
-
-    FILESTORE_CLIENTCOUNT_HISTOGRAM = aff4.Attribute(
-        "aff4:stats/filestore/clientcount", stats.Graph,
-        "File distribution across clients")
 
 
 class ClassCounter(object):
@@ -63,7 +40,7 @@ class ClassFileSizeCounter(ClassCounter):
 
   def Save(self, fd):
     for classname, count in self.value_dict.items():
-      self.graph.Append(label=classname, y_value=count/float(self.GB))
+      self.graph.Append(label=classname, y_value=count / float(self.GB))
     fd.Set(self.attribute, self.graph)
 
 
@@ -75,7 +52,7 @@ class GraphDistribution(stats_lib.Distribution):
   def __init__(self, attribute, title):
     self.attribute = attribute
     self.graph = self.attribute(title=title)
-    super(GraphDistribution, self).__init__(self._bins)
+    super(GraphDistribution, self).__init__(bins=self._bins)
 
   def ProcessFile(self, fd):
     raise NotImplementedError()

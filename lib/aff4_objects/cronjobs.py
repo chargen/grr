@@ -2,6 +2,7 @@
 """Cron management classes."""
 
 
+import random
 import threading
 import time
 
@@ -12,21 +13,17 @@ from grr.lib import aff4
 from grr.lib import config_lib
 from grr.lib import data_store
 from grr.lib import flow
+from grr.lib import master
 from grr.lib import rdfvalue
 from grr.lib import registry
 from grr.lib import stats
 from grr.lib import utils
+
 from grr.proto import flows_pb2
 
 
-config_lib.DEFINE_list("Cron.enabled_system_jobs", [],
-                       "List of system cron jobs that will be "
-                       "automatically scheduled on worker startup. "
-                       "If cron jobs from this list were disabled "
-                       "before, they will be enabled on worker "
-                       "startup. Vice versa, if they were enabled "
-                       "but are not specified in the list, they "
-                       "will be disabled.")
+class Error(Exception):
+  pass
 
 
 class CronSpec(rdfvalue.Duration):
@@ -84,7 +81,13 @@ class CronManager(object):
     cron_job = aff4.FACTORY.Create(cron_job_urn, aff4_type="CronJob", mode="rw",
                                    token=token, force_new_version=False)
 
-    if cron_args != cron_job.Get(cron_job.Schema.CRON_ARGS):
+    # If the cronjob was already present we don't want to overwrite the original
+    # start_time
+    existing_cron_args = cron_job.Get(cron_job.Schema.CRON_ARGS)
+    if existing_cron_args and existing_cron_args.start_time:
+      cron_args.start_time = existing_cron_args.start_time
+
+    if cron_args != existing_cron_args:
       cron_job.Set(cron_job.Schema.CRON_ARGS(cron_args))
 
     if disabled != cron_job.Get(cron_job.Schema.DISABLED):
@@ -116,9 +119,16 @@ class CronManager(object):
     """Deletes cron job with the given URN."""
     aff4.FACTORY.Delete(job_urn, token=token)
 
-  def RunOnce(self, token=None, force=False):
-    """Tries to lock and run every cron job."""
-    for cron_job_urn in self.ListJobs(token=token):
+  def RunOnce(self, token=None, force=False, urns=None):
+    """Tries to lock and run cron jobs.
+
+    Args:
+      token: security token
+      force: If True, force a run
+      urns: List of URNs to run.  If unset, run them all
+    """
+    urns = urns or self.ListJobs(token=token)
+    for cron_job_urn in urns:
       try:
 
         with aff4.FACTORY.OpenWithLock(
@@ -145,7 +155,74 @@ class SystemCronFlow(flow.GRRFlow):
   frequency = rdfvalue.Duration("1d")
   lifetime = rdfvalue.Duration("20h")
 
+  # By default we randomize the start time of system cron flows between 0 and
+  # 'frequency' seconds after it is first created. This only affects the very
+  # first run, after which they will run at 'frequency' intervals. Disable this
+  # behaviour by setting start_time_randomization = False.
+  start_time_randomization = True
+
   __abstract = True  # pylint: disable=g-bad-name
+
+  def WriteState(self):
+    if "w" in self.mode:
+      # For normal flows it's a bug to write an empty state, here it's ok.
+      self.Set(self.Schema.FLOW_STATE(self.state))
+
+
+class StateReadError(Error):
+  pass
+
+
+class StateWriteError(Error):
+  pass
+
+
+class StatefulSystemCronFlow(SystemCronFlow):
+  """SystemCronFlow that keeps a permanent state between iterations."""
+
+  __abstract = True
+
+  @property
+  def cron_job_urn(self):
+    return CRON_MANAGER.CRON_JOBS_PATH.Add(self.__class__.__name__)
+
+  def ReadCronState(self):
+    try:
+      cron_job = aff4.FACTORY.Open(self.cron_job_urn, aff4_type="CronJob",
+                                   token=self.token)
+      return cron_job.Get(cron_job.Schema.STATE, default=rdfvalue.FlowState())
+    except aff4.InstantiationError as e:
+      raise StateReadError(e)
+
+  def WriteCronState(self, state):
+    try:
+      with aff4.FACTORY.OpenWithLock(self.cron_job_urn, aff4_type="CronJob",
+                                     token=self.token) as cron_job:
+        cron_job.Set(cron_job.Schema.STATE(state))
+    except aff4.InstantiationError as e:
+      raise StateWriteError(e)
+
+
+def GetStartTime(cron_cls):
+  """Get start time for a SystemCronFlow class.
+
+  If start_time_randomization is True in the class, randomise the start
+  time to be between now and (now + frequency)
+
+  Args:
+    cron_cls: SystemCronFlow class
+  Returns:
+    rdfvalue.RDFDatetime
+  """
+  if not cron_cls.start_time_randomization:
+    return rdfvalue.RDFDatetime().Now()
+
+  now = rdfvalue.RDFDatetime().Now()
+  window_ms = cron_cls.frequency.microseconds
+
+  start_time_ms = random.randint(now.AsMicroSecondsFromEpoch(),
+                                 now.AsMicroSecondsFromEpoch() + window_ms)
+  return rdfvalue.RDFDatetime(start_time_ms)
 
 
 def ScheduleSystemCronFlows(token=None):
@@ -167,6 +244,7 @@ def ScheduleSystemCronFlows(token=None):
       cron_args = CreateCronJobFlowArgs(periodicity=cls.frequency)
       cron_args.flow_runner_args.flow_name = name
       cron_args.lifetime = cls.lifetime
+      cron_args.start_time = GetStartTime(cls)
 
       disabled = name not in config_lib.CONFIG["Cron.enabled_system_jobs"]
       CRON_MANAGER.ScheduleFlow(cron_args=cron_args,
@@ -177,7 +255,7 @@ def ScheduleSystemCronFlows(token=None):
 class CronWorker(object):
   """CronWorker runs a thread that periodically executes cron jobs."""
 
-  def __init__(self, thread_name="grr_cron", sleep=60*5):
+  def __init__(self, thread_name="grr_cron", sleep=60 * 5):
     self.thread_name = thread_name
     self.sleep = sleep
 
@@ -188,6 +266,9 @@ class CronWorker(object):
     ScheduleSystemCronFlows(token=self.token)
 
     while True:
+      if not master.MASTER_WATCHER.IsMaster():
+        time.sleep(self.sleep)
+        continue
       try:
         CRON_MANAGER.RunOnce(token=self.token)
       except Exception as e:  # pylint: disable=broad-except
@@ -230,6 +311,9 @@ class ManageCronJobFlow(flow.GRRFlow):
       CRON_MANAGER.EnableJob(self.state.args.urn, token=self.token)
     elif self.state.args.action == self.args_type.Action.DELETE:
       CRON_MANAGER.DeleteJob(self.state.args.urn, token=self.token)
+    elif self.state.args.action == self.args_type.Action.RUN:
+      CRON_MANAGER.RunOnce(urns=[self.state.args.urn], token=self.token,
+                           force=True)
 
 
 class CreateCronJobFlow(flow.GRRFlow):
@@ -256,7 +340,7 @@ class CronJob(aff4.AFF4Volume):
 
     DISABLED = aff4.Attribute(
         "aff4:cron/disabled", rdfvalue.RDFBool,
-        "If True, don't run this job.")
+        "If True, don't run this job.", versioned=False)
 
     CURRENT_FLOW_URN = aff4.Attribute(
         "aff4:cron/current_flow_urn", rdfvalue.RDFURN,
@@ -273,14 +357,26 @@ class CronJob(aff4.AFF4Volume):
         "Result of the last flow", lock_protected=True,
         creates_new_object_version=False)
 
+    STATE = aff4.Attribute(
+        "aff4:cron/state", rdfvalue.FlowState,
+        "Cron flow state that is kept between iterations", lock_protected=True,
+        versioned=False)
+
   def IsRunning(self):
     """Returns True if there's a currently running iteration of this job."""
     current_urn = self.Get(self.Schema.CURRENT_FLOW_URN)
     if current_urn:
-      current_flow = aff4.FACTORY.Open(urn=current_urn,
-                                       token=self.token, mode="r")
-      with current_flow.GetRunner() as runner:
-        return runner.context.state == rdfvalue.Flow.State.RUNNING
+      try:
+        current_flow = aff4.FACTORY.Open(urn=current_urn, aff4_type="GRRFlow",
+                                         token=self.token, mode="r")
+      except aff4.InstantiationError:
+        # This isn't a flow, something went really wrong, clear it out.
+        self.DeleteAttribute(self.Schema.CURRENT_FLOW_URN)
+        self.Flush()
+        return False
+
+      runner = current_flow.GetRunner()
+      return runner.context.state == rdfvalue.Flow.State.RUNNING
     return False
 
   def DueToRun(self):
@@ -299,6 +395,10 @@ class CronJob(aff4.AFF4Volume):
     # Its time to run.
     if (last_run_time is None or
         now > cron_args.periodicity.Expiry(last_run_time)):
+
+      # Not due to start yet.
+      if now < cron_args.start_time:
+        return False
 
       # Do we allow overruns?
       if cron_args.allow_overruns:
@@ -365,26 +465,26 @@ class CronJob(aff4.AFF4Volume):
     current_flow_urn = self.Get(self.Schema.CURRENT_FLOW_URN)
     if current_flow_urn:
       current_flow = aff4.FACTORY.Open(current_flow_urn, token=self.token)
-      with current_flow.GetRunner() as runner:
-        if not runner.IsRunning():
-          if runner.context.state == rdfvalue.Flow.State.ERROR:
-            self.Set(self.Schema.LAST_RUN_STATUS,
-                     rdfvalue.CronJobRunStatus(
-                         status=rdfvalue.CronJobRunStatus.Status.ERROR))
-            stats.STATS.IncrementCounter("cron_job_failure",
-                                         fields=[self.urn.Basename()])
-          else:
-            self.Set(self.Schema.LAST_RUN_STATUS,
-                     rdfvalue.CronJobRunStatus(
-                         status=rdfvalue.CronJobRunStatus.Status.OK))
+      runner = current_flow.GetRunner()
+      if not runner.IsRunning():
+        if runner.context.state == rdfvalue.Flow.State.ERROR:
+          self.Set(self.Schema.LAST_RUN_STATUS,
+                   rdfvalue.CronJobRunStatus(
+                       status=rdfvalue.CronJobRunStatus.Status.ERROR))
+          stats.STATS.IncrementCounter("cron_job_failure",
+                                       fields=[self.urn.Basename()])
+        else:
+          self.Set(self.Schema.LAST_RUN_STATUS,
+                   rdfvalue.CronJobRunStatus(
+                       status=rdfvalue.CronJobRunStatus.Status.OK))
 
-            start_time = self.Get(self.Schema.LAST_RUN_TIME)
-            elapsed = time.time() - start_time.AsSecondsFromEpoch()
-            stats.STATS.RecordEvent("cron_job_latency", elapsed,
-                                    fields=[self.urn.Basename()])
+          start_time = self.Get(self.Schema.LAST_RUN_TIME)
+          elapsed = time.time() - start_time.AsSecondsFromEpoch()
+          stats.STATS.RecordEvent("cron_job_latency", elapsed,
+                                  fields=[self.urn.Basename()])
 
-          self.DeleteAttribute(self.Schema.CURRENT_FLOW_URN)
-          self.Flush()
+        self.DeleteAttribute(self.Schema.CURRENT_FLOW_URN)
+        self.Flush()
 
     if not force and not self.DueToRun():
       return
@@ -406,7 +506,7 @@ class CronJob(aff4.AFF4Volume):
 
 class CronHook(registry.InitHook):
 
-  pre = ["AFF4InitHook"]
+  pre = ["AFF4InitHook", "MasterInit"]
 
   def RunOnce(self):
     """Main CronHook method."""

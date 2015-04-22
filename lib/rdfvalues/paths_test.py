@@ -65,18 +65,18 @@ class PathSpecTest(test_base.RDFProtoTestCase):
     pathspec.pathtype = 1
     pathspec.Append(path="foo", pathtype=2)
 
-    self.assertProtoEqual(pathspec_pb, pathspec)
+    self.assertRDFValueEqualToProto(pathspec, pathspec_pb)
 
     # Create a new RDFPathspec from keywords.
     pathspec = rdfvalue.PathSpec(path="/", pathtype=1)
     pathspec.Append(path="foo", pathtype=2)
 
-    self.assertProtoEqual(pathspec_pb, pathspec)
+    self.assertRDFValueEqualToProto(pathspec, pathspec_pb)
 
     # Check that copies are ok
     pathspec = pathspec.Copy()
 
-    self.assertProtoEqual(pathspec_pb, pathspec)
+    self.assertRDFValueEqualToProto(pathspec, pathspec_pb)
 
     # Accessors:
     self.assertEqual(pathspec.path, "/")
@@ -87,7 +87,7 @@ class PathSpecTest(test_base.RDFProtoTestCase):
     pathspec_pb_copy.CopyFrom(pathspec_pb)
 
     pathspec = rdfvalue.PathSpec(pathspec_pb_copy)
-    self.assertProtoEqual(pathspec_pb, pathspec)
+    self.assertRDFValueEqualToProto(pathspec, pathspec_pb)
 
     pathspec.first.path = "test"
     self.assertEqual(pathspec.last.path, "foo")
@@ -173,3 +173,12 @@ class GlobExpressionTest(test_base.RDFValueTestCase):
         client=fd))
     self.assertEqual(interpolated[0], "/home/user0/.mozilla/")
     self.assertEqual(interpolated[1], "/home/user1/.mozilla/")
+
+  def testValidation(self):
+    glob_expression = rdfvalue.GlobExpression(
+        "/home/%%Users.username%%/**/.mozilla/")
+    glob_expression.Validate()
+
+    glob_expression = rdfvalue.GlobExpression(
+        "/home/**/**")
+    self.assertRaises(ValueError, glob_expression.Validate)

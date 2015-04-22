@@ -1,11 +1,6 @@
 #!/usr/bin/env python
-# Copyright 2010 Google Inc. All Rights Reserved.
-
 """This plugin renders the client search page."""
-import json
 import urllib
-
-from django import http
 
 from grr.gui import renderers
 from grr.gui.plugins import forms
@@ -34,30 +29,34 @@ class NotificationCount(renderers.TemplateRenderer):
     except IOError:
       pass
 
-    encoder = json.JSONEncoder()
-    return http.HttpResponse(encoder.encode(dict(number=number)),
-                             content_type="text/json")
+    return renderers.JsonResponse(dict(number=number))
 
 
 class NotificationBar(renderers.TemplateRenderer):
   """Render a notification bar for the user."""
 
   layout_template = renderers.Template("""
-<div id="notification_dialog" class="modal wide-modal hide" tabindex="-1"
+<div id="notification_dialog" class="modal wide-modal" tabindex="-1"
   role="dialog" aria-hidden="true">
-  <div class="modal-header">
-    <button type="button" class="close" data-dismiss="modal"
-      aria-hidden="true">x</button>
-    <h3>Notifications for {{this.user|escape}}</h3>
-  </div>
-  <div class="modal-body" id="notification_dialog_body">
-  </div>
-  <div class="modal-footer">
-    <button class="btn" data-dismiss="modal" aria-hidden="true">Close</button>
+  <div class="modal-dialog">
+    <div class="modal-content">
+      <div class="modal-header">
+        <button type="button" class="close" data-dismiss="modal"
+          aria-hidden="true">x</button>
+        <h3>Notifications for {{this.user|escape}}</h3>
+      </div>
+      <div class="modal-body" id="notification_dialog_body">
+      </div>
+      <div class="modal-footer">
+        <button class="btn btn-default" data-dismiss="modal" aria-hidden="true">
+          Close
+        </button>
+      </div>
+    </div>
   </div>
 </div>
 
-<div id="user_settings_dialog" class="modal hide" tabindex="-1"
+<div id="user_settings_dialog" class="modal" tabindex="-1"
   role="dialog" aria-hidden="true">
 </div>
 
@@ -65,11 +64,11 @@ class NotificationBar(renderers.TemplateRenderer):
   <li><p class="navbar-text">User: {{this.user|escape}}</p></li>
 </ul>
 
-<div id="notifications_and_settings" class="pull-right">
-  <button id="notification_button" class="btn btn-info span1"
+<div id="notifications_and_settings" class="pull-right navbar-form">
+  <button id="notification_button" class="btn btn-info"
          data-toggle="modal" data-target="#notification_dialog"
          style="margin-right: 10px" />
-  <button id="user_settings_button" class="btn" data-toggle="modal"
+  <button id="user_settings_button" class="btn btn-default" data-toggle="modal"
     data-target="#user_settings_dialog">
      <img src="static/images/modify.png" style="height: 17px; margin-top: -2px">
   </button>
@@ -161,7 +160,8 @@ class ViewNotifications(renderers.TableRenderer):
   """Render the notifications for the user."""
 
   target_template = renderers.Template("""
-<a href="/#{{hash|escape}}" target_hash="{{hash|escape}}">{{target}}</span>""")
+<a href="/#{{hash|escape}}" target_hash="{{hash|escape}}"
+   notification_type="{{notification_type|escape}}">{{target}}</span>""")
 
   layout_template = renderers.TableRenderer.layout_template
 
@@ -204,16 +204,17 @@ class ViewNotifications(renderers.TableRenderer):
              "Target": self.FormatFromTemplate(
                  self.target_template,
                  hash=self.BuildHashFromNotification(notification),
+                 notification_type=notification.type,
                  target=notification.subject),
-             "Timestamp": rdfvalue.RDFDatetime(notification.timestamp),
-            }
+             "Timestamp": rdfvalue.RDFDatetime(notification.timestamp)}
       self.AddRow(row, row_index)
       row_index += 1
 
     flow.GRRFlow.StartFlow(flow_name="ResetUserNotifications",
                            token=request.token)
 
-  def BuildHashFromNotification(self, notification):
+  @staticmethod
+  def BuildHashFromNotification(notification):
     """Navigate to the most appropriate location for this navigation."""
     h = {}
 
@@ -230,7 +231,10 @@ class ViewNotifications(renderers.TableRenderer):
       h["c"] = components[0]
       h["main"] = "HostInformation"
 
-    # Downloading a file
+    elif notification.type == "DownloadFile":
+      h["aff4_path"] = notification.subject
+      h["main"] = "DownloadFile"
+
     elif notification.type == "ViewObject":
       path = rdfvalue.RDFURN(urn)
       components = path.Path().split("/")[1:]

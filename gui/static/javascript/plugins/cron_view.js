@@ -36,49 +36,61 @@ grr.Renderer('CronTable', {
 
       $('.cron-job-state-icon', row).each(function() {
         var state = $(this).attr('state');
+        $('#run_cron_job_' + unique).removeAttr('disabled');
+        $('#delete_cron_job_' + unique).removeAttr('disabled');
+
         if (state == 'enabled') {
           $('#enable_cron_job_' + unique).attr('disabled', 'true');
-          $('#delete_cron_job_' + unique).removeAttr('disabled');
           $('#disable_cron_job_' + unique).removeAttr('disabled');
         } else if (state == 'disabled') {
           $('#enable_cron_job_' + unique).removeAttr('disabled');
-          $('#delete_cron_job_' + unique).removeAttr('disabled');
           $('#disable_cron_job_' + unique).attr('disabled', 'true');
         }
       });
     }, unique);
 
 
-    $('#enable_cron_job_dialog_' + unique).on('show', function(event) {
+    $('#enable_cron_job_dialog_' + unique).on('show.bs.modal', function(event) {
       if (event.target != this) return;
 
       grr.layout('EnableCronJobConfirmationDialog',
                  'enable_cron_job_dialog_' + unique, dom_node.data());
-    }).on('hidden', function(event) {
+    }).on('hidden.bs.modal', function(event) {
       $('#' + unique).trigger('refresh');
       $(this).html('');
     });
 
-    $('#disable_cron_job_dialog_' + unique).on('show', function(event) {
+    $('#run_cron_job_dialog_' + unique).on('show.bs.modal', function(event) {
       if (event.target != this) return;
 
-      grr.layout('DisableCronJobConfirmationDialog',
-                 'disable_cron_job_dialog_' + unique, dom_node.data());
+      grr.layout('ForceRunCronJobConfirmationDialog',
+                 'run_cron_job_dialog_' + unique, dom_node.data());
+    }).on('hidden.bs.modal', function(event) {
+      $('#' + unique).trigger('refresh');
+      $(this).html('');
+    });
 
-    }).on('hidden', function(event) {
+
+    $('#disable_cron_job_dialog_' + unique).on(
+        'show.bs.modal', function(event) {
+          if (event.target != this) return;
+
+          grr.layout('DisableCronJobConfirmationDialog',
+                     'disable_cron_job_dialog_' + unique, dom_node.data());
+    }).on('hidden.bs.modal', function(event) {
       if (event.target != this) return;
 
       $('#' + unique).trigger('refresh');
       $(this).html('');
     });
 
-    $('#delete_cron_job_dialog_' + unique).on('show', function(event) {
+    $('#delete_cron_job_dialog_' + unique).on('show.bs.modal', function(event) {
       if (event.target != this) return;
 
       grr.layout('DeleteCronJobConfirmationDialog',
                  'delete_cron_job_dialog_' + unique, dom_node.data());
 
-    }).on('hidden', function(event) {
+    }).on('hidden.bs.modal', function(event) {
       if (event.target != this) return;
 
       $('#' + unique).trigger('refresh');
@@ -86,13 +98,13 @@ grr.Renderer('CronTable', {
     });
 
     $('#schedule_hunt_cron_job_dialog_' + unique).on(
-        'shown', function(event) {
+        'shown.bs.modal', function(event) {
           if (event.target != this) return;
 
           grr.layout('ScheduleHuntCronJobDialog',
                      'schedule_hunt_cron_job_dialog_' + unique);
 
-        }).on('hidden', function(event) {
+        }).on('hidden.bs.modal', function(event) {
           if (event.target != this) return;
 
           $('#' + unique).trigger('refresh');

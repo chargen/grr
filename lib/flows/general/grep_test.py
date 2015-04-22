@@ -1,6 +1,4 @@
 #!/usr/bin/env python
-# Copyright 2012 Google Inc. All Rights Reserved.
-
 """Tests for grr.lib.flows.general.grep."""
 
 
@@ -8,13 +6,19 @@ import os
 
 from grr.client import vfs
 from grr.client.client_actions import searching
+from grr.lib import action_mocks
 from grr.lib import aff4
 from grr.lib import data_store
+from grr.lib import flags
 from grr.lib import rdfvalue
 from grr.lib import test_lib
 
 
-class TestSearchFileContentWithFixture(test_lib.FlowTestsBaseclass):
+class GrepTests(test_lib.FlowTestsBaseclass):
+  pass
+
+
+class TestSearchFileContentWithFixture(GrepTests):
 
   def FlushVFSCache(self):
     test_lib.ClientVFSHandlerFixture.cache = {}
@@ -47,8 +51,7 @@ class TestSearchFileContentWithFixture(test_lib.FlowTestsBaseclass):
               "  path: '%s'\n"
               "}\n"
               "resident: '%s'\n" % (filename, data)),
-           "aff4:size": len(data),
-          })))
+           "aff4:size": len(data)})))
 
   def DeleteFile(self, filename):
 
@@ -64,7 +67,7 @@ class TestSearchFileContentWithFixture(test_lib.FlowTestsBaseclass):
     # Install the mock
     vfs.VFS_HANDLERS[
         rdfvalue.PathSpec.PathType.OS] = test_lib.ClientVFSHandlerFixture
-    self.client_mock = test_lib.ActionMock("Grep", "StatFile", "Find")
+    self.client_mock = action_mocks.ActionMock("Grep", "StatFile", "Find")
 
   def testNormalGrep(self):
     output_path = "analysis/grep1"
@@ -147,18 +150,19 @@ class TestSearchFileContentWithFixture(test_lib.FlowTestsBaseclass):
       searching.Grep.BUFF_SIZE = old_size
 
 
-class TestSearchFileContent(test_lib.FlowTestsBaseclass):
+class TestSearchFileContent(GrepTests):
 
   def testSearchFileContents(self):
     pattern = "test_data/*.log"
 
-    client_mock = test_lib.ActionMock("Find", "Grep", "StatFile")
+    client_mock = action_mocks.ActionMock("Find", "Grep", "StatFile")
     path = os.path.join(os.path.dirname(self.base_path), pattern)
 
     args = rdfvalue.SearchFileContentArgs(
         paths=[path], pathtype=rdfvalue.PathSpec.PathType.OS)
 
-    args.grep.literal = "session opened for user dearjohn"
+    args.grep.literal = rdfvalue.LiteralExpression(
+        "session opened for user dearjohn")
     args.grep.mode = rdfvalue.GrepSpec.Mode.ALL_HITS
 
     # Run the flow.
@@ -183,7 +187,7 @@ class TestSearchFileContent(test_lib.FlowTestsBaseclass):
     """Search files without a grep specification."""
     pattern = "test_data/*.log"
 
-    client_mock = test_lib.ActionMock("Find", "Grep", "StatFile")
+    client_mock = action_mocks.ActionMock("Find", "Grep", "StatFile")
     path = os.path.join(os.path.dirname(self.base_path), pattern)
 
     # Do not provide a Grep expression - should match all files.
@@ -205,8 +209,9 @@ class TestSearchFileContent(test_lib.FlowTestsBaseclass):
 
     pattern = "test_data/*.log"
 
-    client_mock = test_lib.ActionMock("Find", "Grep", "StatFile", "HashFile",
-                                      "HashBuffer", "TransferBuffer")
+    client_mock = action_mocks.ActionMock("Find", "Grep", "StatFile",
+                                          "FingerprintFile", "HashBuffer",
+                                          "TransferBuffer")
     path = os.path.join(os.path.dirname(self.base_path), pattern)
 
     # Do not provide a Grep expression - should match all files.
@@ -231,3 +236,11 @@ class TestSearchFileContent(test_lib.FlowTestsBaseclass):
       self.assertTrue(isinstance(log, aff4.VFSBlobImage))
       # Make sure there is some data.
       self.assertGreater(len(log), 0)
+
+
+def main(argv):
+  # Run the full test suite
+  test_lib.GrrTestProgram(argv=argv)
+
+if __name__ == "__main__":
+  flags.StartMain(main)

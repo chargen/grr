@@ -46,7 +46,7 @@ def Execute(cmd, args, time_limit=-1, bypass_whitelist=False, daemon=False):
   Returns:
     A tuple of stdout, stderr, return value and time taken.
   """
-  if not IsExecutionWhitelisted(cmd, args) and not bypass_whitelist:
+  if not bypass_whitelist and not IsExecutionWhitelisted(cmd, args):
     # Whitelist doesn't contain this cmd/arg pair
     logging.info("Execution disallowed by whitelist: %s %s.", cmd,
                  " ".join(args))
@@ -71,6 +71,7 @@ def Execute(cmd, args, time_limit=-1, bypass_whitelist=False, daemon=False):
 
 
 def _Execute(cmd, args, time_limit=-1):
+  """Executes cmd."""
   run = [cmd]
   run.extend(args)
   logging.info("Executing %s", " ".join(run))
@@ -123,7 +124,7 @@ def IsExecutionWhitelisted(cmd, args):
         ("tasklist.exe", ["/SVC"]),
         ("tasklist.exe", ["/v"]),
         ("driverquery.exe", ["/v"]),
-        ]
+    ]
   elif platform.system() == "Linux":
     whitelist = [
         ("/bin/sleep", ["10"]),
@@ -134,15 +135,24 @@ def IsExecutionWhitelisted(cmd, args):
         ("/sbin/auditctl", ["-l"]),
         ("/sbin/ifconfig", ["-a"]),
         ("/bin/df", []),
-        ]
+        ("/usr/sbin/dmidecode", ["-q"]),
+        ("/usr/sbin/sshd", ["-T"]),
+        ("/usr/bin/who", []),
+        ("/usr/bin/last", []),
+        ("/sbin/lsmod", []),
+    ]
   elif platform.system() == "Darwin":
     whitelist = [
         ("/bin/launchctl", ["unload",
-                            config_lib.CONFIG["Client.launchctl_plist"]]),
+                            config_lib.CONFIG["Client.plist_path"]]),
         ("/bin/echo", ["1"]),
         ("/usr/sbin/screencapture", ["-x", "-t", "jpg", "/tmp/ss.dat"]),
-        ("/bin/rm", ["-f", "/tmp/ss.dat"])
-        ]
+        ("/bin/rm", ["-f", "/tmp/ss.dat"]),
+        ("/usr/sbin/system_profiler", ["-xml", "SPHardwareDataType"]),
+        ("/usr/bin/who", []),
+        ("/usr/bin/last", []),
+        ("/usr/sbin/kextstat", []),
+    ]
   else:
     whitelist = []
 
@@ -153,7 +163,7 @@ def IsExecutionWhitelisted(cmd, args):
   return False
 
 
-LOG_THROTTLE_CACHE = utils.TimeBasedCache(max_size=10, max_age=60*60)
+LOG_THROTTLE_CACHE = utils.TimeBasedCache(max_size=10, max_age=60 * 60)
 
 
 def ErrorOnceAnHour(msg, *args, **kwargs):

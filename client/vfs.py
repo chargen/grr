@@ -34,12 +34,14 @@ class VFSHandler(object):
 
   __metaclass__ = registry.MetaclassRegistry
 
-  def __init__(self, base_fd, pathspec=None):
+  def __init__(self, base_fd, pathspec=None, progress_callback=None):
     """Constructor.
 
     Args:
       base_fd: A handler to the predecessor handler.
       pathspec: The pathspec to open.
+      progress_callback: A callback to indicate that the open call is still
+                         working but needs more time.
 
     Raises:
       IOError: if this handler can not be instantiated over the
@@ -47,11 +49,13 @@ class VFSHandler(object):
     """
     _ = pathspec
     self.base_fd = base_fd
+    self.progress_callback = progress_callback
     if base_fd is None:
       self.pathspec = rdfvalue.PathSpec()
     else:
       # Make a copy of the base pathspec.
       self.pathspec = base_fd.pathspec.Copy()
+    self.metadata = {}
 
   def __enter__(self):
     return self
@@ -99,7 +103,8 @@ class VFSHandler(object):
     else:  # For now just guess TSK.
       return VFS_HANDLERS[rdfvalue.PathSpec.PathType.TSK](
           self, rdfvalue.PathSpec(path="/",
-                                  pathtype=rdfvalue.PathSpec.PathType.TSK))
+                                  pathtype=rdfvalue.PathSpec.PathType.TSK),
+          progress_callback=self.progress_callback)
 
   def MatchBestComponentName(self, component):
     """Returns the name of the component which matches best our base listing.
@@ -154,7 +159,7 @@ class VFSHandler(object):
   close = utils.Proxy("Close")
 
   @classmethod
-  def Open(cls, fd, component, pathspec):
+  def Open(cls, fd, component, pathspec=None, progress_callback=None):
     """Try to correct the casing of component.
 
     This method is called when we failed to open the component directly. We try
@@ -167,6 +172,8 @@ class VFSHandler(object):
       fd: The base fd we will use.
       component: The component we should open.
       pathspec: The rest of the pathspec object.
+      progress_callback: A callback to indicate that the open call is still
+                         working but needs more time.
 
     Returns:
       A file object.
@@ -202,7 +209,8 @@ class VFSHandler(object):
           raise IOError(
               "VFS handler %d not supported." % new_pathspec.pathtype)
 
-        fd = handler(base_fd=fd, pathspec=new_pathspec)
+        fd = handler(base_fd=fd, pathspec=new_pathspec,
+                     progress_callback=progress_callback)
       except IOError:
         # Can not open the first component, we must raise here.
         if i <= 1:
@@ -214,6 +222,9 @@ class VFSHandler(object):
         break
 
     return fd
+
+  def GetMetadata(self):
+    return self.metadata
 
 
 # A registry of all VFSHandler registered
@@ -229,7 +240,7 @@ class VFSInit(registry.InitHook):
         VFS_HANDLERS[handler.supported_pathtype] = handler
 
 
-def VFSOpen(pathspec):
+def VFSOpen(pathspec, progress_callback=None):
   """Expands pathspec to return an expanded Path.
 
   A pathspec is a specification of how to access the file by recursively opening
@@ -281,6 +292,8 @@ def VFSOpen(pathspec):
 
   Args:
     pathspec: A Path() protobuf to normalize.
+    progress_callback: A callback to indicate that the open call is still
+                       working but needs more time.
 
   Returns:
     The open filelike object. This will contain the expanded Path() protobuf as
@@ -307,24 +320,27 @@ def VFSOpen(pathspec):
 
     try:
       # Open the component.
-      fd = handler.Open(fd, component, pathspec)
+      fd = handler.Open(fd, component, pathspec=pathspec,
+                        progress_callback=progress_callback)
     except IOError as e:
       raise IOError("%s: %s" % (e, component))
 
   return fd
 
 
-def ReadVFS(pathspec, offset, length):
+def ReadVFS(pathspec, offset, length, progress_callback=None):
   """Read from the VFS and return the contents.
 
   Args:
     pathspec: path to read from
     offset: number of bytes to skip
     length: number of bytes to read
+    progress_callback: A callback to indicate that the open call is still
+                       working but needs more time.
+
   Returns:
     VFS file contents
   """
-  fd = VFSOpen(pathspec)
+  fd = VFSOpen(pathspec, progress_callback=progress_callback)
   fd.Seek(offset)
   return fd.Read(length)
-

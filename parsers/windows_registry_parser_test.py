@@ -2,8 +2,10 @@
 # -*- mode: python; encoding: utf-8 -*-
 """Tests for grr.parsers.windows_registry_parser."""
 
+from grr.lib import flags
 from grr.lib import rdfvalue
 from grr.lib import test_lib
+from grr.lib import utils
 from grr.parsers import windows_registry_parser
 
 
@@ -37,7 +39,7 @@ class WindowsRegistryParserTest(test_lib.FlowTestsBaseclass):
   def testWinServicesParser(self):
     dword = rdfvalue.StatEntry.RegistryType.REG_DWORD_LITTLE_ENDIAN
     reg_str = rdfvalue.StatEntry.RegistryType.REG_SZ
-    hklm = "HKEY_LOCAL_MACHINE/SYSTEM/CurrentControlSet/services"
+    hklm = "HKEY_LOCAL_MACHINE/SYSTEM/CurrentControlSet/Services"
     hklm_set01 = "HKEY_LOCAL_MACHINE/SYSTEM/ControlSet001/services"
     service_keys = [
         ("%s/ACPI/Type" % hklm, 1, dword),
@@ -53,32 +55,64 @@ class WindowsRegistryParserTest(test_lib.FlowTestsBaseclass):
          rdfvalue.StatEntry.RegistryType.REG_MULTI_SZ),
         (u"%s/中国日报/DisplayName" % hklm, u"中国日报", reg_str),
         (u"%s/中国日报/Parameters/ServiceDLL" % hklm, "blah.dll", reg_str)
-        ]
+    ]
 
     stats = [self._MakeRegStat(*x) for x in service_keys]
     parser = windows_registry_parser.WinServicesParser()
     results = parser.ParseMultiple(stats, None)
 
-    non_ascii = results.next()
-    self.assertEqual(non_ascii.display_name, u"中国日报")
-    self.assertEqual(non_ascii.service_dll, "blah.dll")
+    names = []
+    for result in results:
+      if result.display_name == u"中国日报":
+        self.assertEqual(result.display_name, u"中国日报")
+        self.assertEqual(result.service_dll, "blah.dll")
+        names.append(result.display_name)
+      elif utils.SmartStr(result.registry_key).endswith("AcpiPmi"):
+        self.assertEqual(result.name, "AcpiPmi")
+        self.assertEqual(result.startup_type, 3)
+        self.assertEqual(result.display_name, "[u'AcpiPmi']")
+        self.assertEqual(result.registry_key.Path(),
+                         "/C.1000000000000000/registry/%s/AcpiPmi" % hklm_set01)
+        names.append(result.display_name)
+      elif utils.SmartStr(result.registry_key).endswith("ACPI"):
+        self.assertEqual(result.name, "ACPI")
+        self.assertEqual(result.service_type, 1)
+        self.assertEqual(result.startup_type, 0)
+        self.assertEqual(result.error_control, 3)
+        self.assertEqual(result.image_path, "system32\\drivers\\ACPI.sys")
+        self.assertEqual(result.display_name, "Microsoft ACPI Driver")
+        self.assertEqual(result.group_name, "Boot Bus Extender")
+        self.assertEqual(result.driver_package_id,
+                         "acpi.inf_amd64_neutral_99aaaaabcccccccc")
+        names.append(result.display_name)
+    self.assertItemsEqual(names, [u"中国日报", "[u'AcpiPmi']",
+                                  "Microsoft ACPI Driver"])
 
-    acpipmi = results.next()
-    self.assertEqual(acpipmi.name, "AcpiPmi")
-    self.assertEqual(acpipmi.startup_type, 3)
-    self.assertEqual(acpipmi.display_name, "[u'AcpiPmi']")
-    self.assertEqual(acpipmi.registry_key.Path(),
-                     "/C.1000000000000000/registry/%s/AcpiPmi" % hklm_set01)
+  def testWinUserSpecialDirs(self):
+    reg_str = rdfvalue.StatEntry.RegistryType.REG_SZ
+    hk_u = "registry/HKEY_USERS/S-1-1-1010-10101-1010"
+    service_keys = [
+        ("%s/Environment/TEMP" % hk_u, r"temp\path", reg_str),
+        ("%s/Volatile Environment/USERDOMAIN" % hk_u, "GEVULOT", reg_str)
+    ]
 
-    acpi = results.next()
-    self.assertEqual(acpi.name, "ACPI")
-    self.assertEqual(acpi.service_type, 1)
-    self.assertEqual(acpi.startup_type, 0)
-    self.assertEqual(acpi.error_control, 3)
-    self.assertEqual(acpi.image_path, "system32\\drivers\\ACPI.sys")
-    self.assertEqual(acpi.display_name, "Microsoft ACPI Driver")
-    self.assertEqual(acpi.group_name, "Boot Bus Extender")
-    self.assertEqual(acpi.driver_package_id,
-                     "acpi.inf_amd64_neutral_99aaaaabcccccccc")
-    self.assertRaises(StopIteration, results.next)
+    stats = [self._MakeRegStat(*x) for x in service_keys]
+    parser = windows_registry_parser.WinUserSpecialDirs()
+    results = list(parser.ParseMultiple(stats, None))
+    self.assertEqual(results[0].temp, r"temp\path")
+    self.assertEqual(results[0].userdomain, "GEVULOT")
 
+  def testWinSystemDriveParser(self):
+    sysroot = (r"HKEY_LOCAL_MACHINE\SOFTWARE\Microsoft\Windows NT"
+               r"\CurrentVersion\SystemRoot")
+    stat = self._MakeRegStat(sysroot, r"C:\Windows", None)
+    parser = windows_registry_parser.WinSystemDriveParser()
+    self.assertEqual(r"C:", parser.Parse(stat, None).next())
+
+
+def main(argv):
+  test_lib.main(argv)
+
+
+if __name__ == "__main__":
+  flags.StartMain(main)

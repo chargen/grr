@@ -14,6 +14,7 @@ import logging
 
 from grr.client import actions
 from grr.lib import config_lib
+from grr.lib import queues
 from grr.lib import rdfvalue
 from grr.lib import stats
 
@@ -212,40 +213,45 @@ class GetClientInfo(actions.ActionPlugin):
 
 class GetClientStats(actions.ActionPlugin):
   """This retrieves some stats about the GRR process."""
-  in_rdfvalue = None
+  in_rdfvalue = rdfvalue.GetClientStatsRequest
   out_rdfvalue = rdfvalue.ClientStats
 
-  def Run(self, unused_arg):
+  def Run(self, arg):
     """Returns the client stats."""
+    if arg is None:
+      arg = rdfvalue.GetClientStatsRequest()
+
     proc = psutil.Process(os.getpid())
-    meminfo = proc.get_memory_info()
+    meminfo = proc.memory_info()
     response = rdfvalue.ClientStats(
         RSS_size=meminfo[0],
         VMS_size=meminfo[1],
-        memory_percent=proc.get_memory_percent(),
+        memory_percent=proc.memory_percent(),
         bytes_received=stats.STATS.GetMetricValue(
             "grr_client_received_bytes"),
         bytes_sent=stats.STATS.GetMetricValue(
             "grr_client_sent_bytes"),
-        create_time=long(proc.create_time * 1e6),
-        boot_time=long(psutil.BOOT_TIME * 1e6))
+        create_time=long(proc.create_time() * 1e6),
+        boot_time=long(psutil.boot_time() * 1e6))
 
     samples = self.grr_worker.stats_collector.cpu_samples
     for (timestamp, user, system, percent) in samples:
-      sample = rdfvalue.CpuSample(
-          timestamp=long(timestamp * 1e6),
-          user_cpu_time=user,
-          system_cpu_time=system,
-          cpu_percent=percent)
-      response.cpu_samples.Append(sample)
+      if arg.start_time < timestamp < arg.end_time:
+        sample = rdfvalue.CpuSample(
+            timestamp=timestamp,
+            user_cpu_time=user,
+            system_cpu_time=system,
+            cpu_percent=percent)
+        response.cpu_samples.Append(sample)
 
     samples = self.grr_worker.stats_collector.io_samples
     for (timestamp, read_bytes, write_bytes) in samples:
-      sample = rdfvalue.IOSample(
-          timestamp=long(timestamp * 1e6),
-          read_bytes=read_bytes,
-          write_bytes=write_bytes)
-      response.io_samples.Append(sample)
+      if arg.start_time < timestamp < arg.end_time:
+        sample = rdfvalue.IOSample(
+            timestamp=timestamp,
+            read_bytes=read_bytes,
+            write_bytes=write_bytes)
+        response.io_samples.Append(sample)
 
     self.Send(response)
 
@@ -259,7 +265,8 @@ class GetClientStatsAuto(GetClientStats):
   def Send(self, response):
     self.grr_worker.SendReply(
         response,
-        session_id=rdfvalue.SessionID("aff4:/flows/W:Stats"),
+        session_id=rdfvalue.SessionID(queue=queues.STATS,
+                                      flow_name="Stats"),
         response_id=0,
         request_id=0,
         priority=rdfvalue.GrrMessage.Priority.LOW_PRIORITY,
@@ -272,14 +279,14 @@ class SendStartupInfo(actions.ActionPlugin):
   in_rdfvalue = None
   out_rdfvalue = rdfvalue.StartupInfo
 
-  well_known_session_id = rdfvalue.SessionID("aff4:/flows/W:Startup")
+  well_known_session_id = rdfvalue.SessionID(flow_name="Startup")
 
   def Run(self, unused_arg, ttl=None):
     """Returns the startup information."""
     logging.debug("Sending startup information.")
 
     response = rdfvalue.StartupInfo(
-        boot_time=long(psutil.BOOT_TIME * 1e6),
+        boot_time=long(psutil.boot_time() * 1e6),
         client_info=GetClientInformation())
 
     self.grr_worker.SendReply(

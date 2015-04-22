@@ -1,10 +1,11 @@
 #!/usr/bin/env python
 # -*- mode: python; encoding: utf-8 -*-
 
-# Copyright 2011 Google Inc. All Rights Reserved.
 """Tests for the Find flow."""
 from grr.client import vfs
+from grr.lib import action_mocks
 from grr.lib import aff4
+from grr.lib import flags
 from grr.lib import rdfvalue
 from grr.lib import test_lib
 from grr.lib import type_info
@@ -28,7 +29,7 @@ class TestFindFlow(test_lib.FlowTestsBaseclass):
 
   def testFindFiles(self):
     """Test that the Find flow works with files."""
-    client_mock = test_lib.ActionMock("Find")
+    client_mock = action_mocks.ActionMock("Find")
     output_path = "analysis/FindFlowTest1"
 
     # Prepare a findspec.
@@ -57,7 +58,7 @@ class TestFindFlow(test_lib.FlowTestsBaseclass):
 
   def testFindFilesWithGlob(self):
     """Test that the Find flow works with glob."""
-    client_mock = test_lib.ActionMock("Find")
+    client_mock = action_mocks.ActionMock("Find")
     output_path = "analysis/FindFlowTest1"
 
     # Prepare a findspec.
@@ -87,7 +88,7 @@ class TestFindFlow(test_lib.FlowTestsBaseclass):
   def testFindDirectories(self):
     """Test that the Find flow works with directories."""
 
-    client_mock = test_lib.ActionMock("Find")
+    client_mock = action_mocks.ActionMock("Find")
     output_path = "analysis/FindFlowTest2"
 
     # Prepare a findspec.
@@ -114,7 +115,7 @@ class TestFindFlow(test_lib.FlowTestsBaseclass):
   def testFindWithMaxFiles(self):
     """Test that the Find flow works when specifying proto directly."""
 
-    client_mock = test_lib.ActionMock("Find")
+    client_mock = action_mocks.ActionMock("Find")
     output_path = "analysis/FindFlowTest4"
 
     # Prepare a findspec.
@@ -138,7 +139,7 @@ class TestFindFlow(test_lib.FlowTestsBaseclass):
   def testCollectionOverwriting(self):
     """Test we overwrite the collection every time the flow is executed."""
 
-    client_mock = test_lib.ActionMock("Find")
+    client_mock = action_mocks.ActionMock("Find")
     output_path = "analysis/FindFlowTest5"
 
     # Prepare a findspec.
@@ -168,3 +169,11 @@ class TestFindFlow(test_lib.FlowTestsBaseclass):
     fd = aff4.FACTORY.Open(self.client_id.Add(output_path),
                            token=self.token)
     self.assertEqual(len(fd), 1)
+
+
+def main(argv):
+  # Run the full test suite
+  test_lib.GrrTestProgram(argv=argv)
+
+if __name__ == "__main__":
+  flags.StartMain(main)

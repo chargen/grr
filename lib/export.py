@@ -7,6 +7,7 @@ easily be written to a relational database or just to a set of files.
 """
 
 import hashlib
+import json
 import stat
 import time
 
@@ -16,8 +17,10 @@ import logging
 from grr.lib import aff4
 from grr.lib import rdfvalue
 from grr.lib import registry
+from grr.lib import type_info
 from grr.lib import utils
 from grr.lib.aff4_objects import filestore
+from grr.lib.rdfvalues import structs
 from grr.proto import export_pb2
 
 
@@ -35,6 +38,13 @@ class ExportOptions(rdfvalue.RDFProtoStruct):
 
 class ExportedMetadata(rdfvalue.RDFProtoStruct):
   protobuf = export_pb2.ExportedMetadata
+
+  def __init__(self, initializer=None, age=None, payload=None, **kwarg):
+    super(ExportedMetadata, self).__init__(initializer=initializer,
+                                           age=age, **kwarg)
+
+    if not self.timestamp:
+      self.timestamp = rdfvalue.RDFDatetime().Now()
 
 
 class ExportedClient(rdfvalue.RDFProtoStruct):
@@ -57,16 +67,12 @@ class ExportedNetworkConnection(rdfvalue.RDFProtoStruct):
   protobuf = export_pb2.ExportedNetworkConnection
 
 
+class ExportedDNSClientConfiguration(rdfvalue.RDFProtoStruct):
+  protobuf = export_pb2.ExportedDNSClientConfiguration
+
+
 class ExportedOpenFile(rdfvalue.RDFProtoStruct):
   protobuf = export_pb2.ExportedOpenFile
-
-
-class ExportedVolatilityHandle(rdfvalue.RDFProtoStruct):
-  protobuf = export_pb2.ExportedVolatilityHandle
-
-
-class ExportedVolatilityMutant(rdfvalue.RDFProtoStruct):
-  protobuf = export_pb2.ExportedVolatilityMutant
 
 
 class ExportedNetworkInterface(rdfvalue.RDFProtoStruct):
@@ -75,6 +81,18 @@ class ExportedNetworkInterface(rdfvalue.RDFProtoStruct):
 
 class ExportedFileStoreHash(rdfvalue.RDFProtoStruct):
   protobuf = export_pb2.ExportedFileStoreHash
+
+
+class ExportedSoftware(rdfvalue.RDFProtoStruct):
+  protobuf = export_pb2.ExportedSoftware
+
+
+class ExportedMatch(rdfvalue.RDFProtoStruct):
+  protobuf = export_pb2.ExportedMatch
+
+
+class ExportedBytes(rdfvalue.RDFProtoStruct):
+  protobuf = export_pb2.ExportedBytes
 
 
 class ExportConverter(object):
@@ -116,7 +134,8 @@ class ExportConverter(object):
 
     Metadata object is provided by the caller. It contains basic information
     about where the value is coming from (i.e. client_urn, session_id, etc)
-    as well as timestamps corresponding to when current export started.
+    as well as timestamps corresponding to when data was generated and
+    exported.
 
     ExportConverter should use the metadata when constructing export-friendly
     RDFValues.
@@ -141,7 +160,8 @@ class ExportConverter(object):
 
     Metadata object is provided by the caller. It contains basic information
     about where the value is coming from (i.e. client_urn, session_id, etc)
-    as well as timestamps corresponding to when current export started.
+    as well as timestamps corresponding to when data was generated and
+    exported.
 
     ExportConverter should use the metadata when constructing export-friendly
     RDFValues.
@@ -150,7 +170,7 @@ class ExportConverter(object):
       metadata_value_pairs: a list or a generator of tuples (metadata, value),
                             where metadata is ExportedMetadata to be used for
                             conversion and value is an RDFValue to be converted.
-      token: Security token:
+      token: Security token.
 
     Yields:
       Resulting RDFValues. Empty list is a valid result and means that
@@ -169,8 +189,88 @@ class ExportConverter(object):
     except KeyError:
       results = [cls for cls in ExportConverter.classes.itervalues()
                  if cls.input_rdf_type == value.__class__.__name__]
+      if not results:
+        results = [DataAgnosticExportConverter]
+
       ExportConverter.converters_cache[value.__class__.__name__] = results
       return results
+
+
+class DataAgnosticExportConverter(ExportConverter):
+  """Export converter that yields flattened versions of passed values.
+
+  NOTE: DataAgnosticExportConverter discards complex types: repeated
+  fields and nested messages. Only the primitive types (including enums)
+  are preserved.
+  """
+
+  # Cache used for generated classes.
+  classes_cache = {}
+
+  def ExportedClassNameForValue(self, value):
+    return utils.SmartStr("Exported" + value.__class__.__name__)
+
+  def MakeFlatRDFClass(self, value):
+    """Generates flattened RDFValue class definition for the given value."""
+
+    def Flatten(self, metadata, value_to_flatten):
+      if metadata:
+        self.metadata = metadata
+
+      for desc in value_to_flatten.type_infos:
+        if desc.name == "metadata":
+          continue
+        if hasattr(self, desc.name) and value_to_flatten.HasField(desc.name):
+          setattr(self, desc.name, getattr(value_to_flatten, desc.name))
+
+    output_class = type(self.ExportedClassNameForValue(value),
+                        (rdfvalue.RDFProtoStruct,),
+                        dict(Flatten=Flatten))
+
+    # Metadata is always the first field of exported data.
+    output_class.AddDescriptor(structs.ProtoEmbedded(
+        name="metadata", field_number=1,
+        nested=rdfvalue.ExportedMetadata))
+
+    for number, desc in sorted(value.type_infos_by_field_number.items()):
+      # Name 'metadata' is reserved to store ExportedMetadata value.
+      if desc.name == "metadata":
+        logging.debug("Ignoring 'metadata' field in %s.",
+                      value.__class__.__name__)
+        continue
+
+      # Copy descriptors for primivie values as-is, just make sure their
+      # field number is correct.
+      if isinstance(desc, (type_info.ProtoBinary,
+                           type_info.ProtoString,
+                           type_info.ProtoUnsignedInteger,
+                           type_info.ProtoEnum)):
+        # Incrementing field number by 1, as 1 is always occuppied by metadata.
+        output_class.AddDescriptor(desc.Copy(field_number=number + 1))
+
+      if (isinstance(desc, type_info.ProtoEnum) and
+          not isinstance(desc, type_info.ProtoBoolean)):
+        # Attach the enum container to the class for easy reference:
+        setattr(output_class, desc.enum_name, desc.enum_container)
+
+    return output_class
+
+  def Convert(self, metadata, value, token=None):
+    class_name = self.ExportedClassNameForValue(value)
+    try:
+      class_obj = DataAgnosticExportConverter.classes_cache[class_name]
+    except KeyError:
+      class_obj = self.MakeFlatRDFClass(value)
+      DataAgnosticExportConverter.classes_cache[class_name] = class_obj
+
+    result_obj = class_obj()
+    result_obj.Flatten(metadata, value)
+    yield result_obj
+
+  def BatchConvert(self, metadata_value_pairs, token=None):
+    for metadata, value in metadata_value_pairs:
+      for result in self.Convert(metadata, value, token=token):
+        yield result
 
 
 class StatEntryToExportedFileConverter(ExportConverter):
@@ -237,7 +337,8 @@ class StatEntryToExportedFileConverter(ExportConverter):
     """
     filtered_pairs = []
     for metadata, stat_entry in metadata_value_pairs:
-      if not stat_entry.HasField("registry_type"):
+      # Ignore registry keys.
+      if stat_entry.pathspec.pathtype != rdfvalue.PathSpec.PathType.REGISTRY:
         filtered_pairs.append((metadata, stat_entry))
 
     if self.options.export_files_hashes or self.options.export_files_contents:
@@ -306,24 +407,28 @@ class StatEntryToExportedRegistryKeyConverter(ExportConverter):
       List or generator with resulting RDFValues. Empty list if StatEntry
       corresponds to a file and not to a registry entry.
     """
-    if not stat_entry.HasField("registry_type"):
+    if stat_entry.pathspec.pathtype != rdfvalue.PathSpec.PathType.REGISTRY:
       return []
 
     result = ExportedRegistryKey(metadata=metadata,
                                  urn=stat_entry.aff4path,
-                                 last_modified=stat_entry.st_mtime,
-                                 type=stat_entry.registry_type)
+                                 last_modified=stat_entry.st_mtime)
 
-    try:
-      data = str(stat_entry.registry_data.GetValue())
-    except UnicodeEncodeError:
-      # If we can't represent this as a string...
-      # let's just get the byte representation *shrug*
-      data = stat.registry_data.GetValue()
+    if (stat_entry.HasField("registry_type") and
+        stat_entry.HasField("registry_data")):
+
+      result.type = stat_entry.registry_type
+      try:
+        data = str(stat_entry.registry_data.GetValue())
+      except UnicodeEncodeError:
+        # If we can't represent this as a string...
+        # let's just get the byte representation *shrug*
+        data = stat.registry_data.GetValue()
         # Get the byte representation of the string
-      data = unicode(data).encode("utf-16be")
+        data = unicode(data).encode("utf-16be")
 
-    result.data = data
+      result.data = data
+
     return [result]
 
 
@@ -396,110 +501,65 @@ class ProcessToExportedOpenFileConverter(ExportConverter):
                              path=f)
 
 
-class VolatilityResultConverter(ExportConverter):
-  """Base class for converting volatility results."""
+class SoftwareToExportedSoftwareConverter(ExportConverter):
+  """Converts Software to ExportedSoftware."""
 
-  __abstract = True  # pylint: disable=g-bad-name
+  input_rdf_type = "Software"
 
-  input_rdf_type = "VolatilityResult"
-
-  mapping = None
-  output_rdf_cls = None
-
-  def __init__(self):
-    super(VolatilityResultConverter, self).__init__()
-    if not self.mapping:
-      raise ValueError("Mapping not specified.")
-
-    if not self.output_rdf_cls:
-      raise ValueError("output_rdf_cls not specified")
-
-  def Convert(self, metadata, volatility_result, token=None):
-    for section in volatility_result.sections:
-      # Keep a copy of the headers and their order.
-      try:
-        headers = tuple(self.mapping[h.name] for h in section.table.headers)
-      except KeyError as e:
-        logging.warning("Unmapped header: %s", e)
-        continue
-
-      if not section.table.rows:
-        logging.warning("No rows in the section.")
-        continue
-
-      for row in section.table.rows:
-        # pylint: disable=not-callable
-        out_rdf = self.output_rdf_cls(metadata=metadata)
-        # pylint: enable=not-callable
-
-        for attr, value in zip(headers, row.values):
-          if isinstance(getattr(out_rdf, attr), (str, unicode)):
-            setattr(out_rdf, attr, value.svalue)
-          else:
-            setattr(out_rdf, attr, value.value)
-        yield out_rdf
+  def Convert(self, metadata, software, token=None):
+    yield ExportedSoftware(metadata=metadata,
+                           software=software)
 
 
-class VolatilityResultToExportedVolatilityHandleConverter(
-    VolatilityResultConverter):
-  """Converts VolatilityResult to ExportedVolatilityHandle."""
+class InterfaceToExportedNetworkInterfaceConverter(ExportConverter):
+  input_rdf_type = "Interface"
 
-  mapping = {
-      "offset_v": "offset",
-      "pid": "pid",
-      "handle": "handle",
-      "access": "access",
-      "obj_type": "type",
-      "details": "path",
-  }
+  def Convert(self, metadata, interface, token=None):
+    """Converts Interface to ExportedNetworkInterfaces."""
+    ip4_addresses = []
+    ip6_addresses = []
+    for addr in interface.addresses:
+      if addr.address_type == addr.Family.INET:
+        ip4_addresses.append(addr.human_readable_address)
+      elif addr.address_type == addr.Family.INET6:
+        ip6_addresses.append(addr.human_readable_address)
+      else:
+        raise ValueError("Invalid address type: %s", addr.address_type)
 
-  output_rdf_cls = rdfvalue.ExportedVolatilityHandle
+    result = ExportedNetworkInterface(
+        metadata=metadata,
+        ifname=interface.ifname,
+        ip4_addresses=" ".join(ip4_addresses),
+        ip6_addresses=" ".join(ip6_addresses))
 
+    if interface.mac_address:
+      result.mac_address = interface.mac_address.human_readable_address
 
-class VolatilityResultToExportedVolatilityMutantConverter(
-    VolatilityResultConverter):
-  """Converts VolatilityResult to ExportedVolatilityMutant."""
-
-  mapping = {
-      "offset_p": "offset",
-      "ptr_count": "ptr_count",
-      "hnd_count": "handle_count",
-      "mutant_signal": "signal",
-      "mutant_thread": "thread",
-      "cid": "cid",
-      "mutant_name": "name",
-  }
-
-  output_rdf_cls = rdfvalue.ExportedVolatilityMutant
+    yield result
 
 
-class ClientSummaryToExportedNetworkInterfaceConverter(ExportConverter):
+class DNSClientConfigurationToExportedDNSClientConfiguration(ExportConverter):
+  input_rdf_type = "DNSClientConfiguration"
+
+  def Convert(self, metadata, config, token=None):
+    """Converts DNSClientConfiguration to ExportedDNSClientConfiguration."""
+    result = ExportedDNSClientConfiguration(
+        metadata=metadata,
+        dns_servers=" ".join(config.dns_server),
+        dns_suffixes=" ".join(config.dns_suffix))
+    yield result
+
+
+class ClientSummaryToExportedNetworkInterfaceConverter(
+    InterfaceToExportedNetworkInterfaceConverter):
   input_rdf_type = "ClientSummary"
 
   def Convert(self, metadata, client_summary, token=None):
     """Converts ClientSummary to ExportedNetworkInterfaces."""
-
     for interface in client_summary.interfaces:
-      ip4_addresses = []
-      ip6_addresses = []
-      for addr in interface.addresses:
-        if addr.address_type == addr.Family.INET:
-          ip4_addresses.append(addr.human_readable_address)
-        elif addr.address_type == addr.Family.INET6:
-          ip6_addresses.append(addr.human_readable_address)
-        else:
-          raise ValueError("Invalid address type: %s", addr.address_type)
-
-      result = ExportedNetworkInterface(
-          metadata=metadata,
-          ifname=interface.ifname,
-          ip4_addresses=" ".join(ip4_addresses),
-          ip6_addresses=" ".join(ip6_addresses))
-
-      if interface.mac_address:
-        result.mac_address = interface.mac_address.human_readable_address
-
-      yield result
+      yield super(
+          ClientSummaryToExportedNetworkInterfaceConverter, self).Convert(
+              metadata, interface, token=token).next()
 
 
 class ClientSummaryToExportedClientConverter(ExportConverter):
@@ -507,6 +567,54 @@ class ClientSummaryToExportedClientConverter(ExportConverter):
 
   def Convert(self, metadata, unused_client_summary, token=None):
     return [ExportedClient(metadata=metadata)]
+
+
+class BufferReferenceToExportedMatchConverter(ExportConverter):
+  """Export converter for BufferReference instances."""
+
+  input_rdf_type = "BufferReference"
+
+  def Convert(self, metadata, buffer_reference, token=None):
+    yield ExportedMatch(metadata=metadata,
+                        offset=buffer_reference.offset,
+                        length=buffer_reference.length,
+                        data=buffer_reference.data,
+                        urn=aff4.AFF4Object.VFSGRRClient.PathspecToURN(
+                            buffer_reference.pathspec,
+                            metadata.client_urn))
+
+
+class FileFinderResultConverter(ExportConverter):
+  """Export converter for FileFinderResult instances."""
+
+  input_rdf_type = "FileFinderResult"
+
+  def BatchConvert(self, metadata_value_pairs, token=None):
+    for result in ConvertValuesWithMetadata(
+        [(metadata, val.stat_entry) for metadata, val in metadata_value_pairs],
+        token=token, options=self.options):
+
+      # FileFinderResult has hashes in "hash_entry" attribute which is not
+      # passed to ConvertValuesWithMetadata call. We have to process these
+      # data explicitly here. Note also that we only do this when
+      # ConvertValuesWithMetadata produces ExportedFile values. We have to
+      # check for the value type explicitly as ConvertValuesWithMetadata
+      # may produce values of different types.
+      if val.HasField("hash_entry") and isinstance(result, ExportedFile):
+        StatEntryToExportedFileConverter.ParseFileHash(val.hash_entry, result)
+
+      yield result
+
+    matches = []
+    for metadata, val in metadata_value_pairs:
+      matches.extend([(metadata, match) for match in val.matches])
+
+    for result in ConvertValuesWithMetadata(matches, token=token,
+                                            options=self.options):
+      yield result
+
+  def Convert(self, metadata, result, token=None):
+    return self.BatchConvert([(metadata, result)], token=token)
 
 
 class RDFURNConverter(ExportConverter):
@@ -538,7 +646,7 @@ class RDFURNConverter(ExportConverter):
     try:
       return ConvertValuesWithMetadata(batch)
     except NoConverterFound as e:
-      logging.info(e)
+      logging.debug(e)
 
     return []
 
@@ -594,6 +702,17 @@ class VFSFileToExportedFileConverter(ExportConverter):
     return [result]
 
 
+class RDFBytesToExportedBytesConverter(ExportConverter):
+
+  input_rdf_type = "RDFBytes"
+
+  def Convert(self, metadata, data, token=None):
+    result = ExportedBytes(metadata=metadata,
+                           data=data.SerializeToString(),
+                           length=len(data))
+    return [result]
+
+
 class GrrMessageConverter(ExportConverter):
   """Converts GrrMessage's payload into a set of RDFValues.
 
@@ -609,9 +728,8 @@ class GrrMessageConverter(ExportConverter):
   is done by GrrMessageConverter and not by the caller.
 
   Although ExportedMetadata should still be provided for the conversion to
-  happen, only "session_id" and "timestamp" values will be used. All other
-  metadata will be fetched from the client object pointed to by
-  GrrMessage.source.
+  happen, only "source_urn" and value will be used. All other metadata will be
+  fetched from the client object pointed to by GrrMessage.source.
   """
 
   input_rdf_type = "GrrMessage"
@@ -620,49 +738,42 @@ class GrrMessageConverter(ExportConverter):
     super(GrrMessageConverter, self).__init__(*args, **kw)
     self.cached_metadata = {}
 
-  def Convert(self, metadata, stat_entry, token=None):
+  def Convert(self, metadata, grr_message, token=None):
     """Converts GrrMessage into a set of RDFValues.
 
     Args:
       metadata: ExportedMetadata to be used for conversion.
-      stat_entry: StatEntry to be converted.
+      grr_message: GrrMessage to be converted.
       token: Security token.
 
     Returns:
-      List or generator with resulting RDFValues. Empty list if StatEntry
-      corresponds to a registry entry and not to a file.
+      List or generator with resulting RDFValues.
     """
-    return self.BatchConvert([(metadata, stat_entry)], token=token)
+    return self.BatchConvert([(metadata, grr_message)], token=token)
 
   def BatchConvert(self, metadata_value_pairs, token=None):
-    """Converts a batch of StatEntry value to ExportedFile values at once.
+    """Converts a batch of GrrMessages into a set of RDFValues at once.
 
     Args:
       metadata_value_pairs: a list or a generator of tuples (metadata, value),
                             where metadata is ExportedMetadata to be used for
-                            conversion and value is a StatEntry to be converted.
-      token: Security token:
+                            conversion and value is a GrrMessage to be
+                            converted.
+      token: Security token.
 
     Returns:
       Resulting RDFValues. Empty list is a valid result and means that
       conversion wasn't possible.
     """
-    # Find set of converters for the first message payload.
-    # We assume that payload is of the same type for all the messages in the
-    # batch.
-    converters_classes = ExportConverter.GetConvertersByValue(
-        metadata_value_pairs[0][1].payload)
-    converters = [cls(self.options) for cls in converters_classes]
 
     # Group messages by source (i.e. by client urn).
     msg_dict = {}
     for metadata, msg in metadata_value_pairs:
-      if msg.source not in msg_dict:
-        msg_dict[msg.source] = []
-      msg_dict[msg.source].append((metadata, msg))
+      msg_dict.setdefault(msg.source, []).append((metadata, msg))
 
     metadata_objects = []
     metadata_to_fetch = []
+
     # Open the clients we don't have metadata for and fetch metadata.
     for client_urn in msg_dict.iterkeys():
       try:
@@ -679,22 +790,39 @@ class GrrMessageConverter(ExportConverter):
         self.cached_metadata[metadata.client_urn] = metadata
       metadata_objects.extend(fetched_metadata)
 
-    # Get session id and timestamp from the original metadata provided.
-    batch_data = []
+    data_by_type = {}
     for metadata in metadata_objects:
       try:
         for original_metadata, message in msg_dict[metadata.client_urn]:
+          # Get source_urn and annotations from the original metadata
+          # provided and original_timestamp from the payload age.
           new_metadata = rdfvalue.ExportedMetadata(metadata)
           new_metadata.source_urn = original_metadata.source_urn
-          new_metadata.timestamp = original_metadata.timestamp
-          batch_data.append((new_metadata, message.payload))
+          new_metadata.annotations = original_metadata.annotations
+          new_metadata.original_timestamp = message.payload.age
+          cls_name = message.payload.__class__.__name__
+
+          # Create a dict of values for conversion keyed by type, so we can
+          # apply the right converters to the right object types
+          if cls_name not in data_by_type:
+            converters_classes = ExportConverter.GetConvertersByValue(
+                message.payload)
+            data_by_type[cls_name] = {
+                "converters": [cls(self.options) for cls in converters_classes],
+                "batch_data": [(new_metadata, message.payload)]}
+          else:
+            data_by_type[cls_name]["batch_data"].append(
+                (new_metadata, message.payload))
 
       except KeyError:
         pass
 
+    # Run all converters against all objects of the relevant type
     converted_batch = []
-    for converter in converters:
-      converted_batch.extend(converter.BatchConvert(batch_data, token=token))
+    for dataset in data_by_type.values():
+      for converter in dataset["converters"]:
+        converted_batch.extend(converter.BatchConvert(dataset["batch_data"],
+                                                      token=token))
 
     return converted_batch
 
@@ -752,9 +880,9 @@ class FileStoreHashConverter(ExportConverter):
                       for metadata, urn in metadata_value_pairs])
 
     results = []
-    for hash_urn, hash_hits in filestore.HashFileStore.GetHitsForHashes(
+    for hash_urn, client_files in filestore.HashFileStore.GetClientsForHashes(
         urns, token=token):
-      for hit in hash_hits:
+      for hit in client_files:
         metadata = rdfvalue.ExportedMetadata(urns_dict[hash_urn])
         metadata.client_urn = rdfvalue.RDFURN(hit).Split(2)[0]
 
@@ -767,6 +895,199 @@ class FileStoreHashConverter(ExportConverter):
         results.append(result)
 
     return results
+
+
+def RekallStringRenderer(x):
+  """Function used to render Rekall 'str' objects."""
+  try:
+    return x["str"]
+  except KeyError:
+    return x["b64"]
+
+
+def RekallEProcessRenderer(x):
+  """Function used to render Rekall '_EPROCESS' objects."""
+  return"%s (%s)" % (x["Cybox"]["Name"], x["Cybox"]["PID"])
+
+
+class RekallResponseConverter(ExportConverter):
+  """Export converter for RekallResponse objects."""
+
+  input_rdf_type = "RekallResponse"
+
+  OUTPUT_CLASSES = {}
+
+  OBJECT_RENDERERS = {
+      "_EPROCESS": RekallEProcessRenderer,
+      "Address": lambda x: utils.FormatAsHexString(x["value"]),
+      "AddressSpace": lambda x: x["name"],
+      "BaseObject": lambda x: "@%s" % utils.FormatAsHexString(x["offset"]),
+      "Enumeration": lambda x: "%s (%s)" % (x["enum"], x["value"]),
+      "Instruction": lambda x: utils.SmartStr(x["value"]),
+      "Literal": lambda x: utils.SmartStr(x["value"]),
+      "NativeType": lambda x: utils.SmartStr(x["value"]),
+      "NoneObject": lambda x: "-",
+      "Pointer": lambda x: utils.FormatAsHexString(x["target"], 14),
+      "PaddedAddress": lambda x: utils.FormatAsHexString(x["value"], 14),
+      "str": RekallStringRenderer,
+      "Struct": lambda x: utils.FormatAsHexString(x["offset"]),
+      "UnixTimeStamp": lambda x: utils.FormatAsTimestamp(x["epoch"])
+  }
+
+  def _RenderObject(self, obj):
+    """Renders a single object - i.e. a table cell."""
+
+    if not hasattr(obj, "iteritems"):
+      # Maybe we have to deal with legacy strings, ecnoded as lists with first
+      # element being "+" for base64 strings and "*" for unicode strings -
+      # check it.
+      if isinstance(obj, list) and len(obj) == 2 and obj[0] in ["*", "+"]:
+        return utils.SmartStr(obj[1])
+
+      return utils.SmartStr(obj)
+
+    if "string_value" in obj:
+      return obj["string_value"]
+
+    if "mro" in obj:
+      obj_mro = obj["mro"]
+      if isinstance(obj_mro, basestring):
+        obj_mro = obj_mro.split(":")
+
+      for mro_type in obj_mro:
+        if mro_type in self.OBJECT_RENDERERS:
+          return self.OBJECT_RENDERERS[mro_type](obj)
+
+    return utils.SmartStr(obj)
+
+  def _GenerateOutputClass(self, class_name, tables):
+    """Generates output class with a given name for a given set of tables."""
+
+    output_class = type(utils.SmartStr(class_name),
+                        (rdfvalue.RDFProtoStruct,),
+                        {})
+
+    if not tables:
+      raise RuntimeError("Can't generate output class without Rekall table "
+                         "definition.")
+
+    field_number = 1
+    output_class.AddDescriptor(structs.ProtoEmbedded(
+        name="metadata", field_number=field_number,
+        nested=rdfvalue.ExportedMetadata))
+
+    field_number += 1
+    output_class.AddDescriptor(structs.ProtoString(name="section_name",
+                                                   field_number=field_number))
+
+    field_number += 1
+    output_class.AddDescriptor(structs.ProtoString(name="text",
+                                                   field_number=field_number))
+
+    # All the tables are merged into one. This is done so that if plugin
+    # outputs multiple tables, we get all possible columns in the output
+    # RDFValue.
+    used_names = set()
+    for table in tables:
+      for column_header in table:
+        column_name = None
+        try:
+          column_name = column_header["cname"]
+        except KeyError:
+          pass
+
+        if not column_name:
+          column_name = column_header["name"]
+
+        if not column_name:
+          raise RuntimeError("Can't determine column name in table header.")
+
+        if column_name in used_names:
+          continue
+
+        field_number += 1
+        used_names.add(column_name)
+        output_class.AddDescriptor(
+            structs.ProtoString(name=column_name,
+                                field_number=field_number))
+
+    return output_class
+
+  def _GetOutputClass(self, plugin_name, tables):
+    output_class_name = "RekallExport_" + plugin_name
+
+    try:
+      return RekallResponseConverter.OUTPUT_CLASSES[output_class_name]
+    except KeyError:
+      output_class = self._GenerateOutputClass(output_class_name, tables)
+      RekallResponseConverter.OUTPUT_CLASSES[output_class_name] = output_class
+      return output_class
+
+  def _HandleTableRow(self, metadata, context_dict, message, output_class):
+    """Handles a single row in one of the tables in RekallResponse."""
+    attrs = {}
+    for key, value in message[1].iteritems():
+      if hasattr(output_class, key):
+        # ProtoString expects a unicode object, so let's convert
+        # everything to unicode strings.
+        attrs[key] = utils.SmartUnicode(self._RenderObject(value))
+
+    result = output_class(**attrs)
+    result.metadata = metadata
+
+    try:
+      result.section_name = self._RenderObject(context_dict["s"]["name"])
+    except KeyError:
+      pass
+
+    return result
+
+  def Convert(self, metadata, rekall_response, token=None):
+    """Convert a single RekallResponse."""
+    if rekall_response.HasField("json_context_messages"):
+      parsed_context_messages = json.loads(
+          rekall_response.json_context_messages)
+    else:
+      parsed_context_messages = []
+
+    context_dict = dict(parsed_context_messages)
+    if "t" in context_dict:
+      tables = [context_dict["t"]]
+    else:
+      tables = []
+
+    parsed_messages = json.loads(rekall_response.json_messages)
+
+    # First scan all the messages and find all table definitions there.
+    for message in parsed_messages:
+      # We do not decode lexicon-based responses. If there's non empty
+      # lexicon in the message, we ignore the whole response altogether.
+      if message[0] == "l" and message[1]:
+        logging.warn("Non-empty lexicon found. Client %s is too old.",
+                     rekall_response.client_urn)
+        break
+
+      if message[0] == "t":
+        tables.append(message[1])
+
+    # Generate output class based on all table definitions.
+    output_class = self._GetOutputClass(rekall_response.plugin, tables)
+
+    # Fill generated output class instances with values from every row.
+    for message in parsed_messages:
+      if message[0] in ["s", "t"]:
+        context_dict[message[0]] = message[1]
+
+      if message[0] == "r":
+        yield self._HandleTableRow(metadata, context_dict, message,
+                                   output_class)
+
+  def BatchConvert(self, metadata_value_pairs, token=None):
+    """Convert batch of RekallResponses."""
+
+    for metadata, rekall_response in metadata_value_pairs:
+      for result in self.Convert(metadata, rekall_response):
+        yield result
 
 
 def GetMetadata(client, token=None):
@@ -786,8 +1107,6 @@ def GetMetadata(client, token=None):
     client_fd = client
 
   metadata = ExportedMetadata()
-
-  metadata.timestamp = rdfvalue.RDFDatetime().Now()
 
   metadata.client_urn = client_fd.urn
   metadata.client_age = client_fd.urn.age

@@ -1,6 +1,4 @@
 #!/usr/bin/env python
-# Copyright 2012 Google Inc. All Rights Reserved.
-
 """VFS Handler which provides access to the raw physical memory.
 
 Memory access is provided by use of a special driver. Note that it is preferred
@@ -17,25 +15,33 @@ import sys
 
 from grr.client import vfs
 from grr.lib import rdfvalue
-from grr.lib import utils
 
+# pylint: disable=g-import-not-at-top
+try:
+  import win32file
+except ImportError:
+  win32file = None
 
-win32file = utils.ConditionalImport("win32file")
-fcntl = utils.ConditionalImport("fcntl")
+try:
+  import fcntl
+except ImportError:
+  fcntl = None
+# pylint: enable=g-import-not-at-top
 
 
 class MemoryVFS(vfs.VFSHandler):
   """A base class for memory drivers."""
   page_size = 0x1000
 
-  def __init__(self, base_fd, pathspec):
+  def __init__(self, base_fd, pathspec=None, progress_callback=None):
+    super(MemoryVFS, self).__init__(None, progress_callback=progress_callback)
     self.fd = base_fd
     self.pathspec = pathspec
 
   @classmethod
-  def Open(cls, base_fd, component, pathspec=None):
+  def Open(cls, fd, component, pathspec=None, progress_callback=None):
     _ = pathspec
-    return cls(base_fd, pathspec=component)
+    return cls(fd, pathspec=component, progress_callback=progress_callback)
 
   def IsDirectory(self):
     return False
@@ -79,16 +85,20 @@ class MemoryVFS(vfs.VFSHandler):
 class LinuxMemory(MemoryVFS):
   """A Linux memory VFS driver."""
 
-  def __init__(self, base_fd, pathspec=None):
+  def __init__(self, base_fd, pathspec=None, progress_callback=None):
     """Open the raw memory image.
 
     Args:
       base_fd: The file like object we read this component from.
       pathspec: An optional pathspec to open directly.
+      progress_callback: A callback to indicate that the open call is still
+                         working but needs more time.
+
     Raises:
       IOError: If the file can not be opened.
     """
-    super(LinuxMemory, self).__init__(base_fd, pathspec=pathspec)
+    super(LinuxMemory, self).__init__(base_fd, pathspec=pathspec,
+                                      progress_callback=progress_callback)
     if self.base_fd is not None:
       raise IOError("Memory driver must be a top level VFS handler.")
 
@@ -118,9 +128,8 @@ class LinuxMemory(MemoryVFS):
 
 class WindowsMemory(MemoryVFS):
   """Read the raw memory."""
-  # This is the dtb and kdbg if available
+  # This is the dtb if available.
   cr3 = None
-  kdbg = None
 
   FIELDS = (["CR3", "NtBuildNumber", "KernBase", "KDBG"] +
             ["KPCR%s" % i for i in range(32)] +
@@ -132,16 +141,20 @@ class WindowsMemory(MemoryVFS):
   def CtlCode(device_type, function, method, access):
     return (device_type << 16) | (access << 14) | (function << 2) | method
 
-  def __init__(self, base_fd, pathspec=None):
+  def __init__(self, base_fd, pathspec=None, progress_callback=None):
     """Open the raw memory image.
 
     Args:
       base_fd: The file like object we read this component from.
       pathspec: An optional pathspec to open directly.
+      progress_callback: A callback to indicate that the open call is still
+                         working but needs more time.
+
     Raises:
       IOError: If the file can not be opened.
     """
-    super(WindowsMemory, self).__init__(base_fd, pathspec=pathspec)
+    super(WindowsMemory, self).__init__(base_fd, pathspec=pathspec,
+                                        progress_callback=progress_callback)
     if self.base_fd is not None:
       raise IOError("Memory driver must be a top level.")
 
@@ -165,7 +178,10 @@ class WindowsMemory(MemoryVFS):
     memory_parameters = dict(zip(self.FIELDS,
                                  struct.unpack_from(fmt_string, result)))
     self.cr3 = memory_parameters["CR3"]
-    self.kdbg = memory_parameters["KDBG"]
+
+    self.metadata["dtb"] = self.cr3
+    if memory_parameters["KernBase"] > 0:
+      self.metadata["kernel_base"] = memory_parameters["KernBase"]
 
     offset = struct.calcsize(fmt_string)
     self.runs = []
@@ -207,16 +223,20 @@ class OSXMemory(MemoryVFS):
                         13,  # Pal Code
                         14)  # Max Memory Type
 
-  def __init__(self, base_fd, pathspec=None):
+  def __init__(self, base_fd=None, pathspec=None, progress_callback=None):
     """Open the memory device and get the memory map.
 
     Args:
       base_fd: The file like object we read this component from.
       pathspec: An optional pathspec to open directly.
+      progress_callback: A callback to indicate that the open call is still
+                         working but needs more time.
+
     Raises:
       IOError: If the file can not be opened or an ioctl fails.
     """
-    super(OSXMemory, self).__init__(base_fd, pathspec=pathspec)
+    super(OSXMemory, self).__init__(base_fd, pathspec=pathspec,
+                                    progress_callback=progress_callback)
     if self.base_fd is not None:
       raise IOError("Memory driver must be a top level.")
 
@@ -299,7 +319,7 @@ class OSXMemory(MemoryVFS):
       desc_size: The size in bytes of an individual EfiMemoryRange struct.
 
     Returns:
-      List of tuples (start_address, number_of_pages)
+      List of tuples (start_address, length of segment in bytes)
     """
     num_descriptors = size / desc_size
     result = list()

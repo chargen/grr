@@ -2,6 +2,7 @@
 """Standard actions that happen on the client."""
 
 
+import cStringIO as StringIO
 import ctypes
 import gzip
 import hashlib
@@ -29,7 +30,7 @@ from grr.lib.rdfvalues import crypto
 
 
 # We do not send larger buffers than this:
-MAX_BUFFER_SIZE = 640*1024
+MAX_BUFFER_SIZE = 640 * 1024
 
 
 class ReadBuffer(actions.ActionPlugin):
@@ -44,7 +45,7 @@ class ReadBuffer(actions.ActionPlugin):
       raise RuntimeError("Can not read buffers this large.")
 
     try:
-      fd = vfs.VFSOpen(args.pathspec)
+      fd = vfs.VFSOpen(args.pathspec, progress_callback=self.Progress)
 
       fd.Seek(args.offset)
       offset = fd.Tell()
@@ -74,7 +75,8 @@ class TransferBuffer(actions.ActionPlugin):
     if args.length > MAX_BUFFER_SIZE:
       raise RuntimeError("Can not read buffers this large.")
 
-    data = vfs.ReadVFS(args.pathspec, args.offset, args.length)
+    data = vfs.ReadVFS(args.pathspec, args.offset, args.length,
+                       progress_callback=self.Progress)
     result = rdfvalue.DataBlob(
         data=zlib.compress(data),
         compression=rdfvalue.DataBlob.CompressionType.ZCOMPRESSION)
@@ -88,7 +90,7 @@ class TransferBuffer(actions.ActionPlugin):
     # Now return the data to the server into the special TransferStore well
     # known flow.
     self.grr_worker.SendReply(
-        result, session_id=rdfvalue.SessionID("aff4:/flows/W:TransferStore"))
+        result, session_id=rdfvalue.SessionID(flow_name="TransferStore"))
 
     # Now report the hash of this blob to our flow as well as the offset and
     # length.
@@ -153,7 +155,7 @@ class CopyPathToFile(actions.ActionPlugin):
     Args:
       args: see CopyPathToFile in jobs.proto
     """
-    self.src_fd = vfs.VFSOpen(args.src_path)
+    self.src_fd = vfs.VFSOpen(args.src_path, progress_callback=self.Progress)
     self.src_fd.Seek(args.offset)
     offset = self.src_fd.Tell()
 
@@ -192,7 +194,7 @@ class ListDirectory(ReadBuffer):
   def Run(self, args):
     """Lists a directory."""
     try:
-      directory = vfs.VFSOpen(args.pathspec)
+      directory = vfs.VFSOpen(args.pathspec, progress_callback=self.Progress)
     except (IOError, OSError), e:
       self.SetStatus(rdfvalue.GrrStatus.ReturnedStatus.IOERROR, e)
       return
@@ -212,7 +214,7 @@ class IteratedListDirectory(actions.IteratedAction):
   def Iterate(self, request, client_state):
     """Restores its way through the directory using an Iterator."""
     try:
-      fd = vfs.VFSOpen(request.pathspec)
+      fd = vfs.VFSOpen(request.pathspec, progress_callback=self.Progress)
     except (IOError, OSError), e:
       self.SetStatus(rdfvalue.GrrStatus.ReturnedStatus.IOERROR, e)
       return
@@ -221,11 +223,31 @@ class IteratedListDirectory(actions.IteratedAction):
 
     index = client_state.get("index", 0)
     length = request.iterator.number
-    for response in files[index:index+length]:
+    for response in files[index:index + length]:
       self.SendReply(response)
 
     # Update the state
     client_state["index"] = index + length
+
+
+class SuspendableListDirectory(actions.SuspendableAction):
+  """Lists a directory as a suspendable client action."""
+  in_rdfvalue = rdfvalue.ListDirRequest
+  out_rdfvalue = rdfvalue.StatEntry
+
+  def Iterate(self):
+    try:
+      fd = vfs.VFSOpen(self.request.pathspec, progress_callback=self.Progress)
+    except (IOError, OSError), e:
+      self.SetStatus(rdfvalue.GrrStatus.ReturnedStatus.IOERROR, e)
+      return
+
+    length = self.request.iterator.number
+    for group in utils.Grouper(fd.ListFiles(), length):
+      for response in group:
+        self.SendReply(response)
+
+      self.Suspend()
 
 
 class StatFile(ListDirectory):
@@ -236,36 +258,13 @@ class StatFile(ListDirectory):
   def Run(self, args):
     """Sends a StatResponse for a single file."""
     try:
-      fd = vfs.VFSOpen(args.pathspec)
+      fd = vfs.VFSOpen(args.pathspec, progress_callback=self.Progress)
       res = fd.Stat()
 
       self.SendReply(res)
     except (IOError, OSError), e:
       self.SetStatus(rdfvalue.GrrStatus.ReturnedStatus.IOERROR, e)
       return
-
-
-class HashFile(ListDirectory):
-  """Hashes the file and transmits it to the server."""
-  in_rdfvalue = rdfvalue.ListDirRequest
-  out_rdfvalue = rdfvalue.DataBlob
-
-  def Run(self, args):
-    """Hash a file."""
-    try:
-      fd = vfs.VFSOpen(args.pathspec)
-      hasher = hashlib.sha256()
-      while True:
-        data = fd.Read(1024*1024)
-        if not data: break
-
-        hasher.update(data)
-
-    except (IOError, OSError), e:
-      self.SetStatus(rdfvalue.GrrStatus.ReturnedStatus.IOERROR, e)
-      return
-
-    self.SendReply(data=hasher.digest())
 
 
 class ExecuteCommand(actions.ActionPlugin):
@@ -306,17 +305,42 @@ class ExecuteBinaryCommand(actions.ActionPlugin):
   which should be stored offline and well protected.
 
   This method can be utilized as part of an autoupdate mechanism if necessary.
+
+  NOTE: If the binary is too large to fit inside a single request, the request
+  will have the more_data flag enabled, indicating more data is coming.
   """
   in_rdfvalue = rdfvalue.ExecuteBinaryRequest
   out_rdfvalue = rdfvalue.ExecuteBinaryResponse
 
-  def WriteBlobToFile(self, signed_pb, lifetime, suffix=""):
-    """Writes the blob to a file and returns its path."""
+  suffix = ""
 
-    temp_file = tempfiles.CreateGRRTempFile(suffix=suffix, lifetime=lifetime)
+  def WriteBlobToFile(self, request, suffix=""):
+    """Writes the blob to a file and returns its path."""
+    lifetime = 0
+    # Only set the lifetime thread on the last chunk written.
+    if not request.more_data:
+      lifetime = request.time_limit
+
+      # Keep the file for at least 5 seconds after execution.
+      if lifetime > 0:
+        lifetime += 5
+
+    # First chunk truncates the file, later chunks append.
+    if request.offset == 0:
+      mode = "w+b"
+    else:
+      mode = "r+b"
+
+    temp_file = tempfiles.CreateGRRTempFile(filename=request.write_path,
+                                            suffix=suffix, mode=mode)
     with temp_file:
       path = temp_file.name
-      temp_file.write(signed_pb.data)
+      temp_file.seek(0, 2)
+      if temp_file.tell() != request.offset:
+        raise IOError("Chunks out of order Error.")
+
+      # Write the new chunk.
+      temp_file.write(request.executable.data)
 
     return path
 
@@ -334,24 +358,17 @@ class ExecuteBinaryCommand(actions.ActionPlugin):
     args.executable.Verify(config_lib.CONFIG[
         "Client.executable_signing_public_key"])
 
-    if sys.platform == "win32":
-      # We need .exe here.
-      suffix = ".exe"
-    else:
-      suffix = ""
+    path = self.WriteBlobToFile(args, self.suffix)
 
-    lifetime = args.time_limit
-    # Keep the file for at least 5 seconds after execution.
-    if lifetime > 0:
-      lifetime += 5
+    # Only actually run the file on the last chunk.
+    if not args.more_data:
+      self.ProcessFile(path, args)
+      self.CleanUp(path)
 
-    path = self.WriteBlobToFile(args.executable, lifetime, suffix)
-
+  def ProcessFile(self, path, args):
     res = client_utils_common.Execute(path, args.args, args.time_limit,
                                       bypass_whitelist=True)
     (stdout, stderr, status, time_used) = res
-
-    self.CleanUp(path)
 
     # Limit output to 10MB so our response doesn't get too big.
     stdout = stdout[:10 * 1024 * 1024]
@@ -383,21 +400,43 @@ class ExecutePython(actions.ActionPlugin):
     """Run."""
     time_start = time.time()
 
+    class StdOutHook(object):
+
+      def __init__(self, buf):
+        self.buf = buf
+
+      def write(self, text):
+        self.buf.write(text)
+
     args.python_code.Verify(config_lib.CONFIG[
         "Client.executable_signing_public_key"])
 
     # The execed code can assign to this variable if it wants to return data.
-    magic_return_str = ""
     logging.debug("exec for python code %s", args.python_code.data[0:100])
-    # pylint: disable=exec-used,unused-variable
-    py_args = args.py_args.ToDict()
-    exec(args.python_code.data)
-    # pylint: enable=exec-used,unused-variable
+
+    context = globals().copy()
+    context["py_args"] = args.py_args.ToDict()
+    context["magic_return_str"] = ""
+    # Export the Progress function to allow python hacks to call it.
+    context["Progress"] = self.Progress
+
+    stdout = StringIO.StringIO()
+    with utils.Stubber(sys, "stdout", StdOutHook(stdout)):
+      exec(args.python_code.data, context)  # pylint: disable=exec-used
+
+    stdout_output = stdout.getvalue()
+    magic_str_output = context.get("magic_return_str")
+
+    if stdout_output and magic_str_output:
+      output = "Stdout: %s\nMagic Str:%s\n" % (stdout_output, magic_str_output)
+    else:
+      output = stdout_output or magic_str_output
+
     time_used = time.time() - time_start
     # We have to return microseconds.
     result = rdfvalue.ExecutePythonResponse(
         time_used=int(1e6 * time_used),
-        return_val=utils.SmartStr(magic_return_str))
+        return_val=utils.SmartStr(output))
     self.SendReply(result)
 
 
@@ -427,27 +466,32 @@ class ListProcesses(actions.ActionPlugin):
 
     for proc in psutil.process_iter():
       response = rdfvalue.Process()
-      for field in ["pid", "ppid", "name", "exe", "username", "terminal"]:
-        try:
-          if not hasattr(proc, field) or not getattr(proc, field):
-            continue
-          value = getattr(proc, field)
-          if isinstance(value, (int, long)):
-            setattr(response, field, value)
-          else:
-            setattr(response, field, utils.SmartUnicode(value))
+      process_fields = ["pid", "ppid", "name", "exe", "username", "terminal"]
 
-        except (psutil.NoSuchProcess, psutil.AccessDenied):
+      for field in process_fields:
+        try:
+          value = getattr(proc, field)
+          if value is None:
+            continue
+
+          if callable(value):
+            value = value()
+
+          if not isinstance(value, (int, long)):
+            value = utils.SmartUnicode(value)
+
+          setattr(response, field, value)
+        except (psutil.NoSuchProcess, psutil.AccessDenied, AttributeError):
           pass
 
       try:
-        for arg in proc.cmdline:
+        for arg in proc.cmdline():
           response.cmdline.append(utils.SmartUnicode(arg))
       except (psutil.NoSuchProcess, psutil.AccessDenied):
         pass
 
       try:
-        response.nice = proc.get_nice()
+        response.nice = proc.nice()
       except (psutil.NoSuchProcess, psutil.AccessDenied):
         pass
 
@@ -455,53 +499,54 @@ class ListProcesses(actions.ActionPlugin):
         # Not available on Windows.
         if hasattr(proc, "uids"):
           (response.real_uid, response.effective_uid,
-           response.saved_uid) = proc.uids
+           response.saved_uid) = proc.uids()
           (response.real_gid, response.effective_gid,
-           response.saved_gid) = proc.gids
+           response.saved_gid) = proc.gids()
       except (psutil.NoSuchProcess, psutil.AccessDenied):
         pass
 
       try:
-        response.ctime = long(proc.create_time * 1e6)
-        response.status = str(proc.status)
+        response.ctime = long(proc.create_time() * 1e6)
+        response.status = str(proc.status())
       except (psutil.NoSuchProcess, psutil.AccessDenied):
         pass
 
       try:
         # Not available on OSX.
-        if hasattr(proc, "getcwd"):
-          response.cwd = utils.SmartUnicode(proc.getcwd())
+        if hasattr(proc, "cwd"):
+          response.cwd = utils.SmartUnicode(proc.cwd())
       except (psutil.NoSuchProcess, psutil.AccessDenied):
         pass
 
       try:
-        response.num_threads = proc.get_num_threads()
+        response.num_threads = proc.num_threads()
       except (psutil.NoSuchProcess, psutil.AccessDenied, RuntimeError):
         pass
 
       try:
         (response.user_cpu_time,
-         response.system_cpu_time) = proc.get_cpu_times()
+         response.system_cpu_time) = proc.cpu_times()
         # This is very time consuming so we do not collect cpu_percent here.
         # response.cpu_percent = proc.get_cpu_percent()
       except (psutil.NoSuchProcess, psutil.AccessDenied):
         pass
 
       try:
-        response.RSS_size, response.VMS_size = proc.get_memory_info()
-        response.memory_percent = proc.get_memory_percent()
+        response.RSS_size, response.VMS_size = proc.memory_info()
+        response.memory_percent = proc.memory_percent()
       except (psutil.NoSuchProcess, psutil.AccessDenied):
         pass
 
-      # Due to a bug in psutil, this function is disabled for now.
+      # Due to a bug in psutil, this function is disabled for now
+      # (https://github.com/giampaolo/psutil/issues/340)
       # try:
-      #   for f in proc.get_open_files():
-      #     response.open_files.append(utils.SmartUnicode(f.path))
+      #  for f in proc.open_files():
+      #    response.open_files.append(utils.SmartUnicode(f.path))
       # except (psutil.NoSuchProcess, psutil.AccessDenied):
-      #   pass
+      #  pass
 
       try:
-        for c in proc.get_connections():
+        for c in proc.connections():
           conn = response.connections.Append(family=c.family,
                                              type=c.type,
                                              pid=proc.pid)
@@ -554,7 +599,7 @@ class SendFile(actions.ActionPlugin):
     """Run."""
 
     # Open the file.
-    fd = vfs.VFSOpen(args.pathspec)
+    fd = vfs.VFSOpen(args.pathspec, progress_callback=self.Progress)
 
     if args.address_family == rdfvalue.NetworkAddress.Family.INET:
       family = socket.AF_INET
@@ -584,3 +629,41 @@ class SendFile(actions.ActionPlugin):
     s.close()
 
     self.SendReply(fd.Stat())
+
+
+class StatFS(actions.ActionPlugin):
+  """Call os.statvfs for a given list of paths. OS X and Linux only.
+
+  Note that a statvfs call for a network filesystem (e.g. NFS) that is
+  unavailable, e.g. due to no network, will result in the call blocking.
+  """
+  in_rdfvalue = rdfvalue.StatFSRequest
+  out_rdfvalue = rdfvalue.Volume
+
+  def Run(self, args):
+    if platform.system() == "Windows":
+      raise RuntimeError("os.statvfs not available on Windows")
+
+    for path in args.path_list:
+
+      try:
+        fd = vfs.VFSOpen(rdfvalue.PathSpec(path=path, pathtype=args.pathtype),
+                         progress_callback=self.Progress)
+        st = fd.StatFS()
+        mount_point = fd.GetMountPoint()
+      except (IOError, OSError), e:
+        self.SetStatus(rdfvalue.GrrStatus.ReturnedStatus.IOERROR, e)
+        continue
+
+      unix = rdfvalue.UnixVolume(mount_point=mount_point)
+
+      # On linux pre 2.6 kernels don't have frsize, so we fall back to bsize.
+      # The actual_available_allocation_units attribute is set to blocks
+      # available to the unprivileged user, root may have some additional
+      # reserved space.
+      result = rdfvalue.Volume(bytes_per_sector=(st.f_frsize or st.f_bsize),
+                               sectors_per_allocation_unit=1,
+                               total_allocation_units=st.f_blocks,
+                               actual_available_allocation_units=st.f_bavail,
+                               unix=unix)
+      self.SendReply(result)

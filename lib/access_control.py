@@ -1,5 +1,4 @@
 #!/usr/bin/env python
-# Copyright 2012 Google Inc. All Rights Reserved.
 """The access control classes and user management classes for the data_store.
 
 An AccessControlManager has the following responsibilities:
@@ -13,9 +12,9 @@ A UserManager class has the following responsibilities :
 
 
 
-import logging
 import time
 
+import logging
 
 from grr.lib import rdfvalue
 from grr.lib import registry
@@ -145,7 +144,7 @@ class ACLInit(registry.InitHook):
   subsystem is ready.
   """
 
-  pre = ["StatsInit", "AFF4InitHook"]
+  pre = ["StatsInit"]
 
   def RunOnce(self):
     stats.STATS.RegisterEventMetric("acl_check_time")

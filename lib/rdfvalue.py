@@ -118,6 +118,9 @@ class RDFValue(object):
     """Make a new copy of this RDFValue."""
     return self.__class__(initializer=self.SerializeToString())
 
+  def __copy__(self):
+    return self.Copy()
+
   @property
   def age(self):
     if self._age.__class__ is not RDFDatetime:
@@ -199,13 +202,25 @@ class RDFBytes(RDFValue):
     return utils.SmartStr(self._value)
 
   def __lt__(self, other):
-    return self._value < other
+    if isinstance(other, self.__class__):
+      return self._value < other._value  # pylint: disable=protected-access
+    else:
+      return self._value < other
+
+  def __gt__(self, other):
+    if isinstance(other, self.__class__):
+      return self._value > other._value  # pylint: disable=protected-access
+    else:
+      return self._value > other
 
   def __eq__(self, other):
-    return self._value == other
+    if isinstance(other, self.__class__):
+      return self._value == other._value  # pylint: disable=protected-access
+    else:
+      return self._value == other
 
   def __ne__(self, other):
-    return self._value != other
+    return not self.__eq__(other)
 
   def __hash__(self):
     return hash(self._value)
@@ -240,6 +255,13 @@ class RDFString(RDFBytes):
   def __unicode__(self):
     return utils.SmartUnicode(self._value)
 
+  def __getitem__(self, value):
+    return self._value.__getitem__(value)
+
+  def ParseFromString(self, string):
+    # This handles the cases when we're initialized from Unicode strings.
+    self._value = utils.SmartStr(string)
+
   def SerializeToString(self):
     return utils.SmartStr(self._value)
 
@@ -260,7 +282,7 @@ class HashDigest(RDFBytes):
             self._value.encode("hex") == other)
 
   def __ne__(self, other):
-    return not self == other  # pylint: disable=g-comparison-negation
+    return not self.__eq__(other)
 
 
 @functools.total_ordering
@@ -309,8 +331,22 @@ class RDFInteger(RDFString):
   def __and__(self, other):
     return self._value & other
 
+  def __rand__(self, other):
+    return self._value & other
+
+  def __iand__(self, other):
+    self._value &= other
+    return self
+
   def __or__(self, other):
     return self._value | other
+
+  def __ror__(self, other):
+    return self._value | other
+
+  def __ior__(self, other):
+    self._value |= other
+    return self
 
   def __add__(self, other):
     return self._value + other
@@ -335,8 +371,14 @@ class RDFInteger(RDFString):
   def __mul__(self, other):
     return self._value * other
 
+  def __rmul__(self, other):
+    return self._value * other
+
   def __div__(self, other):
     return self._value / other
+
+  def __rdiv__(self, other):
+    return other / self._value
 
   @staticmethod
   def LessThan(attribute, filter_implemention, value):
@@ -402,8 +444,7 @@ class RDFDatetime(RDFInteger):
 
   def __str__(self):
     """Return the date in human readable (UTC)."""
-    value = self._value / self.converter
-    return time.strftime("%Y-%m-%d %H:%M:%S", time.gmtime(value))
+    return self.Format("%Y-%m-%d %H:%M:%S")
 
   def __unicode__(self):
     return utils.SmartUnicode(str(self))
@@ -434,6 +475,23 @@ class RDFDatetime(RDFInteger):
 
     return NotImplemented
 
+  def __iadd__(self, other):
+    if isinstance(other, (int, long, float, Duration)):
+      # Assume other is in seconds
+      self._value += other * self.converter
+      return self
+
+    return NotImplemented
+
+  def __mul__(self, other):
+    if isinstance(other, (int, long, float, Duration)):
+      return self.__class__(self._value * other)
+
+    return NotImplemented
+
+  def __rmul__(self, other):
+    return self.__mul__(other)
+
   def __sub__(self, other):
     if isinstance(other, (int, long, float, Duration)):
       # Assume other is in seconds
@@ -441,6 +499,14 @@ class RDFDatetime(RDFInteger):
 
     if isinstance(other, RDFDatetime):
       return Duration(self.AsSecondsFromEpoch() - other.AsSecondsFromEpoch())
+
+    return NotImplemented
+
+  def __isub__(self, other):
+    if isinstance(other, (int, long, float, Duration)):
+      # Assume other is in seconds
+      self._value -= other * self.converter
+      return self
 
     return NotImplemented
 
@@ -510,9 +576,9 @@ class Duration(RDFInteger):
   data_store_type = "unsigned_integer"
 
   DIVIDERS = collections.OrderedDict((
-      ("w", 60*60*24*7),
-      ("d", 60*60*24),
-      ("h", 60*60),
+      ("w", 60 * 60 * 24 * 7),
+      ("d", 60 * 60 * 24),
+      ("h", 60 * 60),
       ("m", 60),
       ("s", 1)))
 
@@ -557,6 +623,45 @@ class Duration(RDFInteger):
 
   def __unicode__(self):
     return utils.SmartUnicode(str(self))
+
+  def __add__(self, other):
+    if isinstance(other, (int, long, float, Duration)):
+      # Assume other is in seconds
+      return self.__class__(self._value + other)
+
+    return NotImplemented
+
+  def __iadd__(self, other):
+    if isinstance(other, (int, long, float, Duration)):
+      # Assume other is in seconds
+      self._value += other
+      return self
+
+    return NotImplemented
+
+  def __mul__(self, other):
+    if isinstance(other, (int, long, float, Duration)):
+      return self.__class__(self._value * other)
+
+    return NotImplemented
+
+  def __rmul__(self, other):
+    return self.__mul__(other)
+
+  def __sub__(self, other):
+    if isinstance(other, (int, long, float, Duration)):
+      # Assume other is in seconds
+      return self.__class__(self._value - other)
+
+    return NotImplemented
+
+  def __isub__(self, other):
+    if isinstance(other, (int, long, float, Duration)):
+      # Assume other is in seconds
+      self._value -= other
+      return self
+
+    return NotImplemented
 
   def Expiry(self, base_time=None):
     if base_time is None:
@@ -611,12 +716,12 @@ class ByteSize(RDFInteger):
   DIVIDERS = dict((
       ("", 1),
       ("k", 1000),
-      ("m", 1000**2),
-      ("g", 1000**3),
+      ("m", 1000 ** 2),
+      ("g", 1000 ** 3),
       ("ki", 1024),
-      ("mi", 1024**2),
-      ("gi", 1024**3),
-      ))
+      ("mi", 1024 ** 2),
+      ("gi", 1024 ** 3),
+  ))
 
   REGEX = re.compile("^([0-9.]+)([kmgi]*)b?$")
 
@@ -635,6 +740,22 @@ class ByteSize(RDFInteger):
     else:
       raise InitializeError("Unknown initializer for ByteSize: %s." %
                             type(initializer))
+
+  def __str__(self):
+    size_token = ""
+    if self._value > 1024 ** 3:
+      size_token = "Gb"
+      value = float(self._value) / 1024 ** 3
+    elif self._value > 1024 ** 2:
+      size_token = "Mb"
+      value = float(self._value) / 1024 ** 2
+    elif self._value > 1024:
+      size_token = "Kb"
+      value = float(self._value) / 1024
+    else:
+      return utils.SmartStr(self._value) + "b"
+
+    return "%.1f%s" % (value, size_token)
 
   def ParseFromHumanReadable(self, string):
     """Parse a human readable string of a byte string.
@@ -784,7 +905,7 @@ class RDFURN(RDFValue):
     """Make a copy of ourselves."""
     if age is None:
       age = int(time.time() * MICROSECONDS)
-    return self.__class__(str(self), age=age)
+    return self.__class__(self, age=age)
 
   def __str__(self):
     return utils.SmartStr(self._string_urn)
@@ -890,12 +1011,15 @@ class Subject(RDFURN):
                    startswith=(1, "Startswith"),
                    has=(1, "HasAttribute"))
 
+DEFAULT_FLOW_QUEUE = RDFURN("F")
+
 
 class SessionID(RDFURN):
   """An rdfvalue object that represents a session_id."""
 
-  def __init__(self, initializer=None, age=None, base=None, queue=None,
-               flow_name=None):
+  def __init__(
+      self, initializer=None, age=None, base="aff4:/flows",
+      queue=DEFAULT_FLOW_QUEUE, flow_name=None):
     """Constructor.
 
     Args:
@@ -907,28 +1031,38 @@ class SessionID(RDFURN):
     Raises:
       InitializeError: The given URN cannot be converted to a SessionID.
     """
-    if base:
+    if initializer is None:
       # This SessionID is being constructed from scratch.
-      if not flow_name:
+      if flow_name is None:
         flow_name = utils.PRNG.GetULong()
 
-      initializer = RDFURN(base).Add("%s:%X" % (queue.Basename(), flow_name))
+      if isinstance(flow_name, int):
+        initializer = RDFURN(base).Add("%s:%X" % (queue.Basename(), flow_name))
+      else:
+        initializer = RDFURN(base).Add("%s:%s" % (queue.Basename(), flow_name))
     elif isinstance(initializer, RDFURN):
       if initializer.Basename().count(":") != 1:
         raise InitializeError("Invalid URN for SessionID: %s" % initializer)
-
     super(SessionID, self).__init__(initializer=initializer, age=age)
 
   def Queue(self):
     return RDFURN(self.Basename().split(":")[0])
 
+  def FlowName(self):
+    return self.Basename().split(":")[1]
+
+  def Add(self, path, age=None):
+    # Adding to a SessionID results in a normal RDFURN.
+    return RDFURN(self).Add(path, age=age)
+
 
 class FlowSessionID(SessionID):
 
   # TODO(user): This is code to fix some legacy issues. Remove this when all
-  # clients are built after Jan, 2013.
+  # clients are built after Dec 2014.
+
   def ParseFromString(self, initializer=None):
-    # Old clients sometimes send bare well known flow ids e.g., CA:Enrol.
+    # Old clients sometimes send bare well known flow ids.
     if not utils.SmartStr(initializer).startswith("aff4"):
       initializer = "aff4:/flows/" + initializer
     super(FlowSessionID, self).ParseFromString(initializer)

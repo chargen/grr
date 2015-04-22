@@ -2,6 +2,7 @@
 """Test for client."""
 
 
+import array
 import pdb
 import StringIO
 import time
@@ -9,17 +10,18 @@ import urllib2
 
 
 from M2Crypto import X509
-import mox
 
 import logging
 
 from grr.client import actions
+from grr.client import client
 from grr.client import comms
 from grr.lib import aff4
 from grr.lib import communicator
 from grr.lib import config_lib
 from grr.lib import flags
 from grr.lib import flow
+from grr.lib import queues
 from grr.lib import rdfvalue
 # pylint: disable=unused-import
 from grr.lib import server_plugins
@@ -28,14 +30,16 @@ from grr.lib import stats
 from grr.lib import test_lib
 from grr.lib import utils
 
+from grr.lib.flows.general import ca_enroller
 
-from grr.lib.flows.caenroll import ca_enroller
+# pylint: mode=test
 
 
 class ServerCommunicatorFake(flow.ServerCommunicator):
   """A fake communicator to initialize the ServerCommunicator."""
 
   # For tests we bypass loading of the server certificate.
+
   def _LoadOurCertificate(self):
     return communicator.Communicator._LoadOurCertificate(self)
 
@@ -64,12 +68,16 @@ class ClientCommsTest(test_lib.GRRBaseTest):
         private_key=self.server_private_key,
         token=self.token)
 
+    self.last_urlmock_error = None
+
   def ClientServerCommunicate(self, timestamp=None):
     """Tests the end to end encrypted communicators."""
     message_list = rdfvalue.MessageList()
-    for i in range(0, 10):
+    for i in range(1, 11):
       message_list.job.Append(
-          session_id=rdfvalue.SessionID("aff4:/flows/W:%d" % i),
+          session_id=rdfvalue.SessionID(base="aff4:/flows",
+                                        queue=queues.FLOWS,
+                                        flow_name=i),
           name="OMG it's a string")
 
     result = rdfvalue.ClientCommunication()
@@ -83,9 +91,11 @@ class ClientCommsTest(test_lib.GRRBaseTest):
     self.assertEqual(source, self.client_communicator.common_name)
     self.assertEqual(client_timestamp, timestamp)
     self.assertEqual(len(decoded_messages), 10)
-    for i in range(0, 10):
-      self.assertEqual(decoded_messages[i].session_id,
-                       rdfvalue.SessionID("aff4:/flows/W:%d" % i))
+    for i in range(1, 11):
+      self.assertEqual(decoded_messages[i-1].session_id,
+                       rdfvalue.SessionID(base="aff4:/flows",
+                                          queue=queues.FLOWS,
+                                          flow_name=i))
 
     return decoded_messages
 
@@ -158,11 +168,9 @@ class ClientCommsTest(test_lib.GRRBaseTest):
 
   def testX509Verify(self):
     """X509 Verify can have several failure paths."""
-    x509_verify = X509.X509.verify
 
-    try:
-      # This is a successful verify.
-      X509.X509.verify = lambda self, pkey=None: 1
+    # This is a successful verify.
+    with utils.Stubber(X509.X509, "verify", lambda self, pkey=None: 1):
       self.client_communicator.LoadServerCertificate(
           self.server_certificate, config_lib.CONFIG["CA.certificate"])
 
@@ -177,9 +185,6 @@ class ClientCommsTest(test_lib.GRRBaseTest):
       self.assertRaises(
           IOError, self.client_communicator.LoadServerCertificate,
           self.server_certificate, config_lib.CONFIG["CA.certificate"])
-
-    finally:
-      X509.X509.verify = x509_verify
 
   def testErrorDetection(self):
     """Tests the end to end encrypted communicators."""
@@ -204,8 +209,8 @@ class ClientCommsTest(test_lib.GRRBaseTest):
     for x in range(0, len(cipher_text), 50):
       # Futz with the cipher text (Make sure it's really changed)
       mod_cipher_text = (cipher_text[:x] +
-                         chr((ord(cipher_text[x]) % 250)+1) +
-                         cipher_text[x+1:])
+                         chr((ord(cipher_text[x]) % 250) + 1) +
+                         cipher_text[x + 1:])
 
       try:
         decoded, client_id, _ = self.server_communicator.DecryptMessage(
@@ -220,7 +225,7 @@ class ClientCommsTest(test_lib.GRRBaseTest):
             # original message - so we clear them before comparison.
             message.auth_state = None
             message.source = None
-            self.assertProtoEqual(message, message_list.job[i])
+            self.assertRDFValueEqual(message, message_list.job[i])
           else:
             logging.debug("Message %s: Authstate: %s", i, message.auth_state)
 
@@ -283,9 +288,14 @@ class HTTPClientTests(test_lib.GRRBaseTest):
 
     self.urlopen = urllib2.urlopen
     urllib2.urlopen = self.UrlMock
+
     self.messages = []
 
     ca_enroller.enrolment_cache.Flush()
+
+    # Response to send back to clients.
+    self.server_response = dict(session_id="aff4:/W:session", name="Echo",
+                                response_id=2)
 
   def CreateNewServerCommunicator(self):
     self.server_communicator = ServerCommunicatorFake(
@@ -302,7 +312,8 @@ class HTTPClientTests(test_lib.GRRBaseTest):
 
   def CreateNewClientObject(self):
     self.client_communicator = comms.GRRHTTPClient(
-        self.certificate, worker=comms.GRRClientWorker)
+        ca_cert=config_lib.CONFIG["CA.certificate"],
+        worker=comms.GRRClientWorker)
 
     # Disable stats collection for tests.
     self.client_communicator.client_worker.last_stats_sent_time = (
@@ -312,8 +323,11 @@ class HTTPClientTests(test_lib.GRRBaseTest):
     self.client_communicator.communicator.LoadServerCertificate(
         self.server_certificate, config_lib.CONFIG["CA.certificate"])
 
-  def UrlMock(self, req, **kwargs):
+  def UrlMock(self, req, num_messages=10, **kwargs):
     """A mock for url handler processing from the server's POV."""
+    if "server.pem" in req.get_full_url():
+      return StringIO.StringIO(config_lib.CONFIG["Frontend.certificate"])
+
     _ = kwargs
     try:
       self.client_communication = rdfvalue.ClientCommunication(req.data)
@@ -334,9 +348,8 @@ class HTTPClientTests(test_lib.GRRBaseTest):
       # Now prepare a response
       response_comms = rdfvalue.ClientCommunication()
       message_list = rdfvalue.MessageList()
-      for i in range(0, 10):
-        message_list.job.Append(session_id="aff4:/W:session", name="Echo",
-                                response_id=2, request_id=i)
+      for i in range(0, num_messages):
+        message_list.job.Append(request_id=i, **self.server_response)
 
       # Preserve the timestamp as a nonce
       self.server_communicator.EncodeMessages(
@@ -350,6 +363,8 @@ class HTTPClientTests(test_lib.GRRBaseTest):
       raise urllib2.HTTPError(url=None, code=406, msg=None, hdrs=None, fp=None)
     except Exception as e:
       logging.info("Exception in mock urllib2.Open: %s.", e)
+      self.last_urlmock_error = e
+
       if flags.FLAGS.debug:
         pdb.post_mortem()
 
@@ -407,7 +422,7 @@ class HTTPClientTests(test_lib.GRRBaseTest):
     # Client should generate enrollment message by itself.
     self.assertEqual(len(self.messages), 1)
     self.assertEqual(self.messages[0].session_id,
-                     rdfvalue.SessionID("aff4:/flows/CA:Enrol"))
+                     ca_enroller.Enroler.well_known_session_id)
 
   def testEnrollment(self):
     """Test the http response to unknown clients."""
@@ -436,12 +451,11 @@ class HTTPClientTests(test_lib.GRRBaseTest):
 
     self.assertEqual(len(self.messages), 11)
     self.assertEqual(self.messages[-1].session_id,
-                     rdfvalue.SessionID("aff4:/flows/CA:Enrol"))
+                     ca_enroller.Enroler.well_known_session_id)
 
-    # Now we manually run the enroll well known flow with the enrollment request
-    # - in reality this will be run on the Enroller.
-    # This will start a new flow for enrolling the client, sign the cert and
-    # add it to the data store.
+    # Now we manually run the enroll well known flow with the enrollment
+    # request. This will start a new flow for enrolling the client, sign the
+    # cert and add it to the data store.
     flow_obj = aff4.Enroler(aff4.Enroler.well_known_session_id, mode="rw",
                             token=self.token)
     flow_obj.ProcessMessage(self.messages[-1])
@@ -485,6 +499,44 @@ class HTTPClientTests(test_lib.GRRBaseTest):
     self.client_communicator.RunOnce()
     self.CheckClientQueue()
 
+  def _CheckFastPoll(self, require_fastpoll, expected_sleeptime):
+    sleeptime = []
+
+    def RecordSleep(_, interval, **unused_kwargs):
+      sleeptime.append(interval)
+
+    self.server_response = dict(session_id="aff4:/W:session", name="Echo",
+                                response_id=2, priority="LOW_PRIORITY",
+                                require_fastpoll=require_fastpoll)
+
+    # Make sure we don't have any output messages that might override the
+    # fastpoll setting from the input messages we send
+    self.assertEqual(self.client_communicator.client_worker.OutQueueSize(), 0)
+
+    status = self.client_communicator.RunOnce()
+    self.assertEqual(status.received_count, 10)
+    self.assertEqual(status.require_fastpoll, require_fastpoll)
+    with utils.Stubber(comms.GRRHTTPClient, "Sleep", RecordSleep):
+      self.client_communicator.Wait(status)
+
+    self.assertEqual(len(sleeptime), 1)
+    self.assertEqual(sleeptime[0], expected_sleeptime)
+    self.CheckClientQueue()
+
+  def testNoFastPoll(self):
+    """Test the the fast poll False is respected on input messages.
+
+    Also make sure we wait the correct amount of time before next poll.
+    """
+    self._CheckFastPoll(False, config_lib.CONFIG["Client.poll_max"])
+
+  def testFastPoll(self):
+    """Test the the fast poll True is respected on input messages.
+
+    Also make sure we wait the correct amount of time before next poll.
+    """
+    self._CheckFastPoll(True, config_lib.CONFIG["Client.poll_min"])
+
   def testCachedRSAOperations(self):
     """Make sure that expensive RSA operations are cached."""
     # First time fill the cache.
@@ -507,157 +559,222 @@ class HTTPClientTests(test_lib.GRRBaseTest):
   def testCorruption(self):
     """Simulate corruption of the http payload."""
 
-    def Corruptor(req):
+    self.corruptor_field = None
+
+    def Corruptor(req, **_):
       """Futz with some of the fields."""
       self.client_communication = rdfvalue.ClientCommunication(req.data)
 
-      cipher_text = self.client_communication.encrypted_cipher
-      cipher_text = (cipher_text[:10] +
-                     chr((ord(cipher_text[10]) % 250)+1) +
-                     cipher_text[11:])
+      if self.corruptor_field:
+        field_data = getattr(self.client_communication, self.corruptor_field)
+        modified_data = array.array("c", field_data)
 
-      self.client_communication.encrypted_cipher = cipher_text
+        offset = len(field_data) / 2
+        modified_data[offset] = chr((ord(field_data[offset]) % 250) + 1)
+        setattr(self.client_communication, self.corruptor_field,
+                str(modified_data))
+
+        # Make sure we actually changed the data.
+        self.assertNotEqual(field_data, modified_data)
+
       req.data = self.client_communication.SerializeToString()
       return self.UrlMock(req)
 
-    old_urlopen = urllib2.urlopen
-    try:
-      urllib2.urlopen = Corruptor
-
+    with utils.Stubber(urllib2, "urlopen", Corruptor):
       self.SendToServer()
       status = self.client_communicator.RunOnce()
-      self.assertEqual(status.code, 500)
-    finally:
-      urllib2.urlopen = old_urlopen
+      self.assertEqual(status.code, 200)
+
+      for field in ["packet_iv", "encrypted"]:
+        # Corrupting each field should result in HMAC verification errors.
+        self.corruptor_field = field
+
+        self.SendToServer()
+        status = self.client_communicator.RunOnce()
+
+        self.assertEqual(status.code, 500)
+        self.assertTrue(
+            "HMAC verification failed" in str(self.last_urlmock_error))
+
+      # Corruption of these fields will likely result in RSA errors, since we do
+      # the RSA operations before the HMAC verification (in order to recover the
+      # hmac key):
+      for field in ["encrypted_cipher", "encrypted_cipher_metadata"]:
+        # Corrupting each field should result in HMAC verification errors.
+        self.corruptor_field = field
+
+        self.SendToServer()
+        status = self.client_communicator.RunOnce()
+
+        self.assertEqual(status.code, 500)
 
   def testClientRetransmission(self):
     """Test that client retransmits failed messages."""
-
     fail = True
+    num_messages = 10
 
     def FlakyServer(req):
       if not fail:
-        return self.UrlMock(req)
+        return self.UrlMock(req, num_messages=num_messages)
+
       raise urllib2.HTTPError(url=None, code=500, msg=None, hdrs=None, fp=None)
 
-    urllib2.urlopen = FlakyServer
+    with utils.Stubber(urllib2, "urlopen", FlakyServer):
+      self.SendToServer()
+      status = self.client_communicator.RunOnce()
+      self.assertEqual(status.code, 500)
 
-    self.SendToServer()
-    status = self.client_communicator.RunOnce()
-    self.assertEqual(status.code, 500)
+      # Server should not receive anything.
+      self.assertEqual(len(self.messages), 0)
 
-    # Server should not receive anything.
-    self.assertEqual(len(self.messages), 0)
+      # Try to send these messages again.
+      fail = False
 
-    # Try to send these messages again.
-    fail = False
+      self.assertEqual(self.client_communicator.client_worker.InQueueSize(), 0)
 
-    status = self.client_communicator.RunOnce()
+      status = self.client_communicator.RunOnce()
 
-    self.assertEqual(status.code, 200)
-    self.CheckClientQueue()
+      self.assertEqual(status.code, 200)
 
-    # Server should have received 10 messages this time.
-    self.assertEqual(len(self.messages), 10)
+      # We have received 10 client messages.
+      self.assertEqual(self.client_communicator.client_worker.InQueueSize(), 10)
+      self.CheckClientQueue()
+      # But we don't send anything to the server on the first successful
+      # connection.
+      self.assertEqual(len(self.messages), 0)
+
+      # There are no more messages coming in from the server.
+      num_messages = 0
+
+      status = self.client_communicator.RunOnce()
+
+      self.assertEqual(status.code, 200)
+
+      self.assertEqual(self.client_communicator.client_worker.InQueueSize(), 0)
+
+      # Server should have received 10 messages this time.
+      self.assertEqual(len(self.messages), 10)
 
   def testClientStatsCollection(self):
     """Tests that the client stats are collected automatically."""
-
     now = 1000000
     # Pretend we have already sent stats.
-    self.client_communicator.client_worker.last_stats_sent_time = now
-
-    self.mox = mox.Mox()
-    self.mox.StubOutWithMock(logging, "info")
-    self.mox.StubOutWithMock(time, "time")
-
-    try:
-      # No calls to logging here.
-      time.time().AndReturn(now)
-      self.mox.ReplayAll()
-      self.client_communicator.client_worker.CheckStats()
-
-    finally:
-      self.mox.UnsetStubs()
-      self.mox.VerifyAll()
-
-    # Creating responses calls time.time() so we mock the action out.
-    action_cls = actions.ActionPlugin.classes.get("GetClientStatsAuto")
-    old_run = action_cls.Run
-    action_cls.Run = lambda cls, _: True
-    self.mox.StubOutWithMock(logging, "info")
-    self.mox.StubOutWithMock(time, "time")
-
-    try:
-      # No stats collection after 10 minutes.
-      time.time().AndReturn(now + 600)
-      # Let one hour pass.
-      time.time().AndReturn(now + 3600)
-      # This time the client should collect stats.
-      logging.info("Sending back client statistics to the server.")
-      # For setting the last time we need to replay another time() call.
-      time.time().AndReturn(now + 3600)
-
-      # The last call will be shortly after.
-      time.time().AndReturn(now + 3600 + 600)
-      # Again, there should be no stats collection and, thus, no logging either.
-
-      self.mox.ReplayAll()
-
-      self.client_communicator.client_worker.CheckStats()
-      self.client_communicator.client_worker.CheckStats()
-      self.client_communicator.client_worker.CheckStats()
-
-    finally:
-      self.mox.UnsetStubs()
-      self.mox.VerifyAll()
-      action_cls.Run = old_run
-
-    # Disable stats collection again.
     self.client_communicator.client_worker.last_stats_sent_time = (
-        time.time() + 3600)
+        rdfvalue.RDFDatetime().FromSecondsFromEpoch(now))
 
+    with test_lib.FakeTime(now):
+      self.client_communicator.client_worker.CheckStats()
 
-class BackwardsCompatibleClientCommsTest(ClientCommsTest):
-  """Test that we can talk using the old protocol still (version 2)."""
+    runs = []
+    action_cls = actions.ActionPlugin.classes.get("GetClientStatsAuto")
+    with utils.Stubber(action_cls, "Run", lambda cls, _: runs.append(1)):
 
-  def setUp(self):
-    self.current_api = config_lib.CONFIG["Network.api"]
-    config_lib.CONFIG.Set("Network.api", 2)
-    super(BackwardsCompatibleClientCommsTest, self).setUp()
+      # No stats collection after 10 minutes.
+      with test_lib.FakeTime(now + 600):
+        self.client_communicator.client_worker.CheckStats()
+        self.assertEqual(len(runs), 0)
 
+      # Let one hour pass.
+      with test_lib.FakeTime(now + 3600):
+        self.client_communicator.client_worker.CheckStats()
+        # This time the client should collect stats.
+        self.assertEqual(len(runs), 1)
 
-class BackwardsCompatibleHTTPClientTests(HTTPClientTests):
-  """Test that we can talk using the old protocol still (version 2)."""
+      # Let one hour and ten minutes pass.
+      with test_lib.FakeTime(now + 3600 + 600):
+        self.client_communicator.client_worker.CheckStats()
+        # Again, there should be no stats collection, as last collection
+        # happened less than an hour ago.
+        self.assertEqual(len(runs), 1)
 
-  def setUp(self):
-    super(BackwardsCompatibleHTTPClientTests, self).setUp()
-    config_lib.CONFIG.Set("Network.api", 2)
+  def testClientStatsCollectionHappensEveryMinuteWhenClientIsBusy(self):
+    """Tests that client stats are collected more often when client is busy."""
+    now = 1000000
+    # Pretend we have already sent stats.
+    self.client_communicator.client_worker.last_stats_sent_time = (
+        rdfvalue.RDFDatetime().FromSecondsFromEpoch(now))
+    self.client_communicator.client_worker._is_active = True
 
-  def testCachedRSAOperations(self):
-    """With the old protocol there should be many RSA operations."""
-    # First time fill the cache.
-    self.SendToServer()
-    self.client_communicator.RunOnce()
-    self.CheckClientQueue()
+    with test_lib.FakeTime(now):
+      self.client_communicator.client_worker.CheckStats()
 
-    metric_value = stats.STATS.GetMetricValue("grr_rsa_operations")
-    self.assert_(metric_value > 0)
+    runs = []
+    action_cls = actions.ActionPlugin.classes.get("GetClientStatsAuto")
+    with utils.Stubber(action_cls, "Run", lambda cls, _: runs.append(1)):
 
-    for _ in range(5):
-      self.SendToServer()
-      self.client_communicator.RunOnce()
-      self.CheckClientQueue()
+      # No stats collection after 30 seconds.
+      with test_lib.FakeTime(now + 30):
+        self.client_communicator.client_worker.CheckStats()
+        self.assertEqual(len(runs), 0)
 
-    # There should be about 2 operations per loop iteration using the old
-    # protocol (client and server must sign the message_list). Note that clients
-    # actually running the old version will do 4 operations per loop since we
-    # used to generate a new cipher protobuf for each packet as well. However,
-    # currently, when running in compatibility mode we cache the same ciphers on
-    # each end. The result is that the new code is still faster even when
-    # running the old api.
-    self.assertEqual(stats.STATS.GetMetricValue("grr_rsa_operations"),
-                     metric_value + 10)
+      # Let 61 seconds pass.
+      with test_lib.FakeTime(now + 61):
+        self.client_communicator.client_worker.CheckStats()
+        # This time the client should collect stats.
+        self.assertEqual(len(runs), 1)
+
+      # No stats collection within one minute from the last time.
+      with test_lib.FakeTime(now + 61 + 59):
+        self.client_communicator.client_worker.CheckStats()
+        self.assertEqual(len(runs), 1)
+
+      # Stats collection happens as more than one minute has passed since the
+      # last one.
+      with test_lib.FakeTime(now + 61 + 61):
+        self.client_communicator.client_worker.CheckStats()
+        self.assertEqual(len(runs), 2)
+
+  def testClientStatsCollectionAlwaysHappensAfterHandleMessage(self):
+    """Tests that client stats are collected more often when client is busy."""
+    now = 1000000
+    # Pretend we have already sent stats.
+    self.client_communicator.client_worker.last_stats_sent_time = (
+        rdfvalue.RDFDatetime().FromSecondsFromEpoch(now))
+
+    with test_lib.FakeTime(now):
+      self.client_communicator.client_worker.CheckStats()
+
+    runs = []
+    action_cls = actions.ActionPlugin.classes.get("GetClientStatsAuto")
+    with utils.Stubber(action_cls, "Run", lambda cls, _: runs.append(1)):
+
+      # No stats collection after 30 seconds.
+      with test_lib.FakeTime(now + 30):
+        self.client_communicator.client_worker.CheckStats()
+        self.assertEqual(len(runs), 0)
+
+      self.client_communicator.client_worker.HandleMessage(
+          rdfvalue.GrrMessage())
+
+      # HandleMessage was called, but one minute hasn't passed, so
+      # stats should not be sent.
+      with test_lib.FakeTime(now + 59):
+        self.client_communicator.client_worker.CheckStats()
+        self.assertEqual(len(runs), 0)
+
+      # HandleMessage was called more than one minute ago, so stats
+      # should be sent.
+      with test_lib.FakeTime(now + 61):
+        self.client_communicator.client_worker.CheckStats()
+        self.assertEqual(len(runs), 1)
+
+  def RaiseError(self, request, timeout=0):
+    raise urllib2.URLError("Not a real connection.")
+
+  def testClientConnectionErrors(self):
+    client_obj = client.GRRClient()
+
+    # Make the connection unavailable and skip the retry interval.
+    with utils.MultiStubber((urllib2, "urlopen", self.RaiseError),
+                            (time, "sleep", lambda s: None)):
+
+      # Simulate a client run but keep control.
+      generator = client_obj.client.Run()
+      for _ in range(config_lib.CONFIG["Client.connection_error_limit"]):
+        generator.next()
+
+      # One too many connection errors, this should raise.
+      self.assertRaises(RuntimeError, generator.next)
 
 
 def main(argv):

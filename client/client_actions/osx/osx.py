@@ -48,9 +48,11 @@ class UnsupportedOSVersionError(Error):
 #       u_char  sdl_slen;       /* link layer selector length */
 #       char    sdl_data[12];   /* minimum work area, can be larger;
 #                                  contains both if name and ll address */
-#       u_short sdl_rcf;        /* source routing control */
-#       u_short sdl_route[16];  /* source routing information */
 # };
+
+
+# Interfaces can have names up to 15 chars long and sdl_data contains name + mac
+# but no separators - we need to make sdl_data at least 15+6 bytes.
 
 
 class Sockaddrdl(ctypes.Structure):
@@ -63,10 +65,8 @@ class Sockaddrdl(ctypes.Structure):
       ("sdl_nlen", ctypes.c_ubyte),
       ("sdl_alen", ctypes.c_ubyte),
       ("sdl_slen", ctypes.c_ubyte),
-      ("sdl_data", ctypes.c_char * 12),
-      ("sdl_rcf", ctypes.c_ushort),
-      ("sdl_route", ctypes.c_char * 16)
-      ]
+      ("sdl_data", ctypes.c_ubyte * 24),
+  ]
 
 # struct sockaddr_in {
 #         __uint8_t       sin_len;
@@ -85,7 +85,7 @@ class Sockaddrin(ctypes.Structure):
       ("sin_port", ctypes.c_ushort),
       ("sin_addr", ctypes.c_ubyte * 4),
       ("sin_zero", ctypes.c_char * 8)
-      ]
+  ]
 
 # struct sockaddr_in6 {
 #         __uint8_t       sin6_len;       /* length of this struct */
@@ -106,7 +106,7 @@ class Sockaddrin6(ctypes.Structure):
       ("sin6_flowinfo", ctypes.c_ubyte * 4),
       ("sin6_addr", ctypes.c_ubyte * 16),
       ("sin6_scope_id", ctypes.c_ubyte * 4)
-      ]
+  ]
 
 
 # struct ifaddrs   *ifa_next;         /* Pointer to next struct */
@@ -131,7 +131,7 @@ setattr(Ifaddrs, "_fields_", [
     ("ifa_broadaddr", ctypes.POINTER(ctypes.c_char)),
     ("ifa_destaddr", ctypes.POINTER(ctypes.c_char)),
     ("ifa_data", ctypes.POINTER(ctypes.c_char))
-    ])
+])
 
 
 class EnumerateInterfaces(actions.ActionPlugin):
@@ -167,7 +167,8 @@ class EnumerateInterfaces(actions.ActionPlugin):
           data = ctypes.cast(m.contents.ifa_addr, ctypes.POINTER(Sockaddrdl))
           iflen = data.contents.sdl_nlen
           addlen = data.contents.sdl_alen
-          macs[ifname] = data.contents.sdl_data[iflen:iflen+addlen]
+          macs[ifname] = "".join(
+              map(chr, data.contents.sdl_data[iflen:iflen + addlen]))
 
         if iffamily == 0x1E:     # AF_INET6
           data = ctypes.cast(m.contents.ifa_addr, ctypes.POINTER(Sockaddrin6))
@@ -211,20 +212,6 @@ class GetInstallDate(actions.ActionPlugin):
     self.SendReply(integer=0)
 
 
-class EnumerateUsers(actions.ActionPlugin):
-  """Enumerates all the users on this system."""
-  out_rdfvalue = rdfvalue.User
-
-  def Run(self, unused_args):
-    """Enumerate all users on this machine."""
-    # TODO(user): Add /var/run/utmpx parsing as per linux
-    blacklist = ["Shared"]
-    for user in os.listdir("/Users"):
-      userdir = "/Users/{0}".format(user)
-      if user not in blacklist and os.path.isdir(userdir):
-        self.SendReply(username=user, homedir=userdir)
-
-
 class EnumerateFilesystems(actions.ActionPlugin):
   """Enumerate all unique filesystems local to the system."""
   out_rdfvalue = rdfvalue.Filesystem
@@ -259,10 +246,10 @@ class EnumerateFilesystems(actions.ActionPlugin):
         continue
 
 
-class EnumerateRunningServices(actions.ActionPlugin):
+class OSXEnumerateRunningServices(actions.ActionPlugin):
   """Enumerate all running launchd jobs."""
   in_rdfvalue = None
-  out_rdfvalue = rdfvalue.Service
+  out_rdfvalue = rdfvalue.OSXServiceInformation
 
   def GetRunningLaunchDaemons(self):
     """Get running launchd jobs from objc ServiceManagement framework."""
@@ -295,37 +282,27 @@ class EnumerateRunningServices(actions.ActionPlugin):
     """Create the Service protobuf.
 
     Args:
-      job: Launcdjobdict from servicemanagement framework.
+      job: Launchdjobdict from servicemanagement framework.
     Returns:
-      sysinfo_pb2.Service proto
+      sysinfo_pb2.OSXServiceInformation proto
     """
-    rdf_job = rdfvalue.LaunchdJob(sessiontype=
-                                  job.get("LimitLoadToSessionType", ""),
-                                  lastexitstatus=job["LastExitStatus"].value,
-                                  timeout=job["TimeOut"].value,
-                                  ondemand=job["OnDemand"].value)
+    service = rdfvalue.OSXServiceInformation(
+        label=job.get("Label"), program=job.get("Program"),
+        sessiontype=job.get("LimitLoadToSessionType"),
+        lastexitstatus=int(job["LastExitStatus"]),
+        timeout=int(job["TimeOut"]), ondemand=bool(job["OnDemand"]))
 
-    # Returns CFArray of CFStrings
-    args = job.get("ProgramArguments", "", stringify=False)
-    arg_values = []
-    if args:
-      for arg in args:
-        # Need to get .value so unicode is handled properly
-        arg_values.append(arg.value)
-      args = " ".join(arg_values)
+    for arg in job.get("ProgramArguments", "", stringify=False):
+      # Returns CFArray of CFStrings
+      service.args.Append(unicode(arg))
 
     mach_dict = job.get("MachServices", {}, stringify=False)
     for key, value in mach_dict.iteritems():
-      rdf_job.machservice.Append("%s:%s" % (key, value))
+      service.machservice.Append("%s:%s" % (key, value))
 
     job_mach_dict = job.get("PerJobMachServices", {}, stringify=False)
     for key, value in job_mach_dict.iteritems():
-      rdf_job.perjobmachservice.Append("%s:%s" % (key, value))
-
-    service = rdfvalue.Service(label=job.get("Label", ""),
-                               program=job.get("Program", ""),
-                               args=args,
-                               osx_launchd=rdf_job)
+      service.perjobmachservice.Append("%s:%s" % (key, value))
 
     if "PID" in job:
       service.pid = job["PID"].value
@@ -465,16 +442,9 @@ class UninstallDriver(actions.ActionPlugin):
 class UpdateAgent(standard.ExecuteBinaryCommand):
   """Updates the GRR agent to a new version."""
 
-  in_rdfvalue = rdfvalue.ExecuteBinaryRequest
-  out_rdfvalue = rdfvalue.ExecuteBinaryResponse
+  suffix = "pkg"
 
-  def Run(self, args):
-    """Run."""
-    pub_key = config_lib.CONFIG["Client.executable_signing_public_key"]
-    if not args.executable.Verify(pub_key):
-      raise OSError("Executable signing failure.")
-
-    path = self.WriteBlobToFile(args.executable, args.write_path, ".pkg")
+  def ProcessFile(self, path, args):
 
     cmd = "/usr/sbin/installer"
     cmd_args = ["-pkg", path, "-target", "/"]
@@ -483,8 +453,6 @@ class UpdateAgent(standard.ExecuteBinaryCommand):
     res = client_utils_common.Execute(cmd, cmd_args, time_limit=time_limit,
                                       bypass_whitelist=True)
     (stdout, stderr, status, time_used) = res
-
-    self.CleanUp(path)
 
     # Limit output to 10MB so our response doesn't get too big.
     stdout = stdout[:10 * 1024 * 1024]

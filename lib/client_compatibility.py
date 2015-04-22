@@ -18,7 +18,7 @@ class ClientCompatibility(flow.EventListener):
 
   EVENTS = ["ClientStartup"]
 
-  well_known_session_id = rdfvalue.SessionID("aff4:/flows/W:TemporaryFix")
+  well_known_session_id = rdfvalue.SessionID(flow_name="TemporaryFix")
 
   @flow.EventHandler(allow_client_access=True, auth_required=False)
   def ProcessMessage(self, message=None, event=None):

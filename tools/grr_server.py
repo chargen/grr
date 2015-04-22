@@ -30,13 +30,10 @@ from grr.gui import admin_ui
 from grr.lib import config_lib
 from grr.lib import flags
 from grr.lib import startup
+from grr.server.data_server import data_server
 from grr.tools import http_server
-from grr.worker import enroller
 from grr.worker import worker
 
-
-flags.DEFINE_bool("start_enroller", False,
-                  "Start the server as enroller.")
 
 flags.DEFINE_bool("start_worker", False,
                   "Start the server as worker.")
@@ -47,20 +44,23 @@ flags.DEFINE_bool("start_http_server", False,
 flags.DEFINE_bool("start_ui", False,
                   "Start the server as user interface.")
 
+flags.DEFINE_bool("start_dataserver", False,
+                  "Start the dataserver.")
+
 
 def main(argv):
   """Sets up all the component in their own threads."""
   flag_list = [flags.FLAGS.start_worker, flags.FLAGS.start_ui,
-               flags.FLAGS.start_http_server, flags.FLAGS.start_enroller]
+               flags.FLAGS.start_http_server, flags.FLAGS.start_dataserver]
   enabled_flags = [f for f in flag_list if f]
 
-  # If no start preferences were provided start everything.
+  # If no start preferences were provided start everything
   if not enabled_flags:
     flags.FLAGS.start_worker = True
-    flags.FLAGS.start_enroller = True
     flags.FLAGS.start_http_server = True
     flags.FLAGS.start_ui = True
 
+  threads = []
   if len(enabled_flags) != 1:
     # If we only have one flag, we are running in single component mode and we
     # want the component to do the initialization. Otherwise we initialize as
@@ -75,20 +75,15 @@ def main(argv):
     worker_thread = threading.Thread(target=worker.main, args=[argv],
                                      name="Worker")
     worker_thread.daemon = True
+    threads.append(worker_thread)
     worker_thread.start()
-
-  # Start the enroller thread if necessary.
-  if flags.FLAGS.start_enroller:
-    enroller_thread = threading.Thread(target=enroller.main, args=[argv],
-                                       name="Enroller")
-    enroller_thread.daemon = True
-    enroller_thread.start()
 
   # Start the HTTP server thread, that clients communicate with, if necessary.
   if flags.FLAGS.start_http_server:
     http_thread = threading.Thread(target=http_server.main, args=[argv],
                                    name="HTTP Server")
     http_thread.daemon = True
+    threads.append(http_thread)
     http_thread.start()
 
   # Start the UI thread if necessary.
@@ -96,11 +91,26 @@ def main(argv):
     ui_thread = threading.Thread(target=admin_ui.main, args=[argv],
                                  name="GUI")
     ui_thread.daemon = True
+    threads.append(ui_thread)
     ui_thread.start()
+
+  # Start the data server thread if necessary.
+  if flags.FLAGS.start_dataserver:
+    dataserver_thread = threading.Thread(target=data_server.main, args=[argv],
+                                         name="Dataserver")
+    dataserver_thread.daemon = True
+    threads.append(dataserver_thread)
+    dataserver_thread.start()
 
   try:
     while True:
-      time.sleep(100)
+      time.sleep(5)
+
+      # If any threads die GRR will not work, so if there is a dead one we exit
+      for thread in threads:
+        if not thread.is_alive():
+          raise RuntimeError("Child thread %s has died, exiting" % thread.name)
+
   except KeyboardInterrupt:
     pass
 

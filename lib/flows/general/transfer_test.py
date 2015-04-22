@@ -6,11 +6,15 @@ import os
 
 
 from grr.client.client_actions import standard
+from grr.lib import action_mocks
 from grr.lib import aff4
+from grr.lib import flags
 from grr.lib import rdfvalue
 from grr.lib import test_lib
 from grr.lib import utils
 from grr.lib.flows.general import transfer
+
+# pylint:mode=test
 
 
 class TestTransfer(test_lib.FlowTestsBaseclass):
@@ -57,7 +61,7 @@ class TestTransfer(test_lib.FlowTestsBaseclass):
   def testGetFile(self):
     """Test that the GetFile flow works."""
 
-    client_mock = test_lib.ActionMock("TransferBuffer", "StatFile")
+    client_mock = action_mocks.ActionMock("TransferBuffer", "StatFile")
     pathspec = rdfvalue.PathSpec(
         pathtype=rdfvalue.PathSpec.PathType.OS,
         path=os.path.join(self.base_path, "test_img.dd"))
@@ -79,12 +83,12 @@ class TestTransfer(test_lib.FlowTestsBaseclass):
     self.CompareFDs(fd1, fd2)
 
   def testGetFileWithZeroStat(self):
-    """Test that the GetFile flow works."""
+    """Test GetFile works on stat.st_size==0 files when read_length is set."""
     pathspec = rdfvalue.PathSpec(
         pathtype=rdfvalue.PathSpec.PathType.OS,
         path=os.path.join(self.base_path, "test_img.dd"))
 
-    class ClientMock(test_lib.ActionMock):
+    class ClientMock(action_mocks.ActionMock):
 
       def StatFile(self, _):
         # Return a stat response with no size.
@@ -106,14 +110,14 @@ class TestTransfer(test_lib.FlowTestsBaseclass):
 
     for _ in test_lib.TestFlowHelper("GetFile", client_mock, token=self.token,
                                      client_id=self.client_id,
-                                     read_length=2*1024*1024 + 5,
+                                     read_length=2 * 1024 * 1024 + 5,
                                      pathspec=pathspec):
       pass
 
     # When we explicitly pass the read_length parameter we read more of the
     # file.
     fd = aff4.FACTORY.Open(urn, token=self.token)
-    self.assertEqual(fd.size, 2*1024*1024 + 5)
+    self.assertEqual(fd.size, 2 * 1024 * 1024 + 5)
 
   def CompareFDs(self, fd1, fd2):
     ranges = [
@@ -125,7 +129,7 @@ class TestTransfer(test_lib.FlowTestsBaseclass):
         (fd2.tell() - 100, 300),
         # Zero length reads
         (100, 0),
-        ]
+    ]
 
     for offset, length in ranges:
       fd1.Seek(offset)
@@ -134,3 +138,43 @@ class TestTransfer(test_lib.FlowTestsBaseclass):
       fd2.seek(offset)
       data2 = fd2.read(length)
       self.assertEqual(data1, data2)
+
+  def testMultiGetFile(self):
+    """Test MultiGetFile."""
+
+    client_mock = action_mocks.ActionMock("TransferBuffer", "FingerprintFile",
+                                          "StatFile", "HashBuffer")
+    pathspec = rdfvalue.PathSpec(
+        pathtype=rdfvalue.PathSpec.PathType.OS,
+        path=os.path.join(self.base_path, "test_img.dd"))
+
+    args = rdfvalue.MultiGetFileArgs(pathspecs=[pathspec, pathspec])
+    with test_lib.Instrument(
+        transfer.MultiGetFile, "StoreStat") as storestat_instrument:
+      for _ in test_lib.TestFlowHelper("MultiGetFile", client_mock,
+                                       token=self.token,
+                                       client_id=self.client_id, args=args):
+        pass
+
+      # We should only have called StoreStat once because the two paths
+      # requested were identical.
+      self.assertEqual(len(storestat_instrument.args), 1)
+
+    # Fix path for Windows testing.
+    pathspec.path = pathspec.path.replace("\\", "/")
+    # Test the AFF4 file that was created.
+    urn = aff4.AFF4Object.VFSGRRClient.PathspecToURN(pathspec, self.client_id)
+    fd1 = aff4.FACTORY.Open(urn, token=self.token)
+    fd2 = open(pathspec.path)
+    fd2.seek(0, 2)
+
+    self.assertEqual(fd2.tell(), int(fd1.Get(fd1.Schema.SIZE)))
+    self.CompareFDs(fd1, fd2)
+
+
+def main(argv):
+  # Run the full test suite
+  test_lib.GrrTestProgram(argv=argv)
+
+if __name__ == "__main__":
+  flags.StartMain(main)

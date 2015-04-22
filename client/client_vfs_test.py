@@ -5,7 +5,6 @@
 
 
 import os
-import platform
 import stat
 
 
@@ -25,9 +24,7 @@ from grr.lib import utils
 from grr.lib.aff4_objects import aff4_grr
 
 
-def setUpModule():
-  # Initialize the VFS system
-  vfs.VFSInit()
+# pylint: mode=test
 
 
 class VFSTest(test_lib.GRRBaseTest):
@@ -75,7 +72,7 @@ class VFSTest(test_lib.GRRBaseTest):
   def testOpenFilehandles(self):
     """Test that file handles are cached."""
     current_process = psutil.Process(os.getpid())
-    num_open_files = len(current_process.get_open_files())
+    num_open_files = len(current_process.open_files())
 
     path = os.path.join(self.base_path, "morenumbers.txt")
 
@@ -88,14 +85,14 @@ class VFSTest(test_lib.GRRBaseTest):
       fds.append(fd)
 
     # This should not create any new file handles.
-    self.assertTrue(len(current_process.get_open_files()) - num_open_files < 5)
+    self.assertTrue(len(current_process.open_files()) - num_open_files < 5)
 
   def testOpenFilehandlesExpire(self):
     """Test that file handles expire from cache."""
     files.FILE_HANDLE_CACHE = utils.FastStore(max_size=10)
 
     current_process = psutil.Process(os.getpid())
-    num_open_files = len(current_process.get_open_files())
+    num_open_files = len(current_process.open_files())
 
     path = os.path.join(self.base_path, "morenumbers.txt")
     fd = vfs.VFSOpen(
@@ -111,7 +108,7 @@ class VFSTest(test_lib.GRRBaseTest):
       fds.append(child_fd)
 
     # This should not create any new file handles.
-    self.assertTrue(len(current_process.get_open_files()) - num_open_files < 5)
+    self.assertTrue(len(current_process.open_files()) - num_open_files < 5)
 
     # Make sure we exceeded the size of the cache.
     self.assert_(fds > 20)
@@ -236,7 +233,7 @@ class VFSTest(test_lib.GRRBaseTest):
 
     ps = rdfvalue.PathSpec(path=path,
                            pathtype=rdfvalue.PathSpec.PathType.OS,
-                           offset=63*512)
+                           offset=63 * 512)
     ps.Append(ps2)
     fd = vfs.VFSOpen(ps)
 
@@ -246,7 +243,7 @@ class VFSTest(test_lib.GRRBaseTest):
                             pathtype=rdfvalue.PathSpec.PathType.TSK)
     ps = rdfvalue.PathSpec(path=path,
                            pathtype=rdfvalue.PathSpec.PathType.OS,
-                           offset=63*512)
+                           offset=63 * 512)
     ps.Append(ps2)
     fd = vfs.VFSOpen(ps)
 
@@ -265,7 +262,7 @@ class VFSTest(test_lib.GRRBaseTest):
 
     ps = rdfvalue.PathSpec(path=path,
                            pathtype=rdfvalue.PathSpec.PathType.OS,
-                           offset=63*512)
+                           offset=63 * 512)
     ps.Append(ps2)
     fd = vfs.VFSOpen(ps)
 
@@ -326,6 +323,28 @@ class VFSTest(test_lib.GRRBaseTest):
     self.assertEqual(s.pathspec.nested_path.inode, 65)
     self.assertEqual(s.pathspec.nested_path.ntfs_type, 128)
     self.assertEqual(s.pathspec.nested_path.ntfs_id, 4)
+
+  def testNTFSProgressCallback(self):
+
+    self.progress_counter = 0
+
+    def Progress():
+      self.progress_counter += 1
+
+    path = os.path.join(self.base_path, "ntfs_img.dd")
+    path2 = "test directory"
+
+    ps2 = rdfvalue.PathSpec(path=path2,
+                            pathtype=rdfvalue.PathSpec.PathType.TSK)
+
+    ps = rdfvalue.PathSpec(path=path,
+                           pathtype=rdfvalue.PathSpec.PathType.OS,
+                           offset=63 * 512)
+    ps.Append(ps2)
+
+    vfs.VFSOpen(ps, progress_callback=Progress)
+
+    self.assertTrue(self.progress_counter > 0)
 
   def testUnicodeFile(self):
     """Test ability to read unicode files from images."""
@@ -417,33 +436,27 @@ class VFSTest(test_lib.GRRBaseTest):
       self.assertEqual(s.pathspec.nested_path.path, "/home/image2.img")
       names.append(s.pathspec.nested_path.nested_path.path)
 
-    self.assertTrue("/home/a.txt" in names)
+    self.assertTrue("home/a.txt" in names)
 
   def testRegistryListing(self):
     """Test our ability to list registry keys."""
-    if platform.system() != "Windows":
-      return
+    vfs.VFS_HANDLERS[
+        rdfvalue.PathSpec.PathType.REGISTRY] = test_lib.FakeRegistryVFSHandler
 
-    # Make a value we can test for
-    import _winreg  # pylint: disable=g-import-not-at-top
+    pathspec = rdfvalue.PathSpec(pathtype=rdfvalue.PathSpec.PathType.REGISTRY,
+                                 path=("/HKEY_USERS/S-1-5-20/Software/Microsoft"
+                                       "/Windows/CurrentVersion/Run"))
 
-    key = _winreg.OpenKey(_winreg.HKEY_CURRENT_USER,
-                          "Software",
-                          0,
-                          _winreg.KEY_CREATE_SUB_KEY)
-    subkey = _winreg.CreateKey(key, "GRR_Test")
-    _winreg.SetValueEx(subkey, "foo", 0, _winreg.REG_SZ, "bar")
+    expected_names = {"MctAdmin": stat.S_IFDIR,
+                      "Sidebar": stat.S_IFDIR}
+    expected_data = [u"%ProgramFiles%\\Windows Sidebar\\Sidebar.exe /autoRun",
+                     u"%TEMP%\\Sidebar.exe"]
 
-    vfs_path = "HKEY_CURRENT_USER/Software/GRR_Test"
-
-    pathspec = rdfvalue.PathSpec(
-        path=vfs_path,
-        pathtype=rdfvalue.PathSpec.PathType.REGISTRY)
     for f in vfs.VFSOpen(pathspec).ListFiles():
-      self.assertEqual(f.pathspec.path, "/" + vfs_path + "/foo")
-      self.assertEqual(f.resident, "bar")
-
-    _winreg.DeleteKey(key, "GRR_Test")
+      base, name = os.path.split(f.pathspec.CollapsePath())
+      self.assertEqual(base, pathspec.CollapsePath())
+      self.assertIn(name, expected_names)
+      self.assertIn(f.registry_data.GetValue(), expected_data)
 
   def CheckDirectoryListing(self, directory, test_file):
     """Check that the directory listing is sensible."""

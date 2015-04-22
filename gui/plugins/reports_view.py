@@ -13,7 +13,7 @@ class ReportNameRenderer(forms.StringTypeFormRenderer):
   type_descriptor = rdfvalue.ReportName
   default = "ClientListReport"
 
-  layout_template = ("""<div class="control-group">
+  layout_template = ("""<div class="form-group">
 """ + forms.TypeDescriptorFormRenderer.default_description_view + """
   <div class="controls">
     <select id='{{this.prefix}}' onchange="grr.forms.inputOnChange(this)"
@@ -25,13 +25,11 @@ class ReportNameRenderer(forms.StringTypeFormRenderer):
     </select>
   </div>
 </div>
-<script>
- // Force a state update as the default should be usable. Cleaner way?
- grr.forms.inputOnChange($("#{{this.prefix|escapejs}}"));
-</script>
 """)
 
   def Layout(self, request, response):
     self.reports = [r.__name__ for r in reports.Report.class_list
                     if r is not reports.Report.top_level_class]
-    super(ReportNameRenderer, self).Layout(request, response)
+    response = super(ReportNameRenderer, self).Layout(request, response)
+    return self.CallJavascript(response, "ReportNameRenderer.Layout",
+                               prefix=self.prefix)

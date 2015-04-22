@@ -24,6 +24,7 @@ class CurrentControlSetKBParser(parsers.RegistryValueParser):
   def Parse(self, stat, unused_knowledge_base):
     """Parse the key currentcontrolset output."""
     value = stat.registry_data.GetValue()
+
     if not str(value).isdigit() or int(value) > 999 or int(value) < 0:
       raise parsers.ParseError("Invalid value for CurrentControlSet key %s" %
                                value)
@@ -38,6 +39,8 @@ class WinEnvironmentParser(parsers.RegistryValueParser):
   supported_artifacts = ["WinPathEnvironmentVariable",
                          "WinDirEnvironmentVariable", "TempEnvironmentVariable",
                          "AllUsersAppDataEnvironmentVariable"]
+  # Required for environment variable expansion
+  knowledgebase_dependencies = ["environ_systemdrive", "environ_systemroot"]
 
   def Parse(self, stat, knowledge_base):
     """Parse the key currentcontrolset output."""
@@ -48,6 +51,40 @@ class WinEnvironmentParser(parsers.RegistryValueParser):
                                                            knowledge_base)
     if value:
       yield rdfvalue.RDFString(value)
+
+
+class WinSystemDriveParser(parsers.RegistryValueParser):
+  """Parser for SystemDrive environment variable."""
+
+  output_types = ["RDFString"]
+  supported_artifacts = ["SystemDriveEnvironmentVariable"]
+
+  def Parse(self, stat, _):
+    """Parse the key currentcontrolset output."""
+    value = stat.registry_data.GetValue()
+    if not value:
+      raise parsers.ParseError("Invalid value for key %s" % stat.pathspec.path)
+
+    systemdrive = value[0:2]
+    if re.match(r"^[A-Za-z]:$", systemdrive):
+      yield rdfvalue.RDFString(systemdrive)
+    else:
+      raise parsers.ParseError(
+          "Bad drive letter for key %s" % stat.pathspec.path)
+
+
+class WinSystemRootParser(parsers.RegistryValueParser):
+  """Parser for SystemRoot environment variables."""
+
+  output_types = ["RDFString"]
+  supported_artifacts = ["SystemRoot"]
+
+  def Parse(self, stat, _):
+    value = stat.registry_data.GetValue()
+    if value:
+      yield rdfvalue.RDFString(value)
+    else:
+      raise parsers.ParseError("Invalid value for key %s" % stat.pathspec.path)
 
 
 class CodepageParser(parsers.RegistryValueParser):
@@ -70,6 +107,8 @@ class AllUsersProfileEnvironmentVariable(parsers.RegistryParser):
   """
   output_types = ["RDFString"]
   supported_artifacts = ["AllUsersProfileEnvironmentVariable"]
+  # Required for environment variable expansion
+  knowledgebase_dependencies = ["environ_systemdrive", "environ_systemroot"]
   process_together = True
 
   def ParseMultiple(self, stats, knowledge_base):
@@ -107,7 +146,12 @@ class WinUserSids(parsers.RegistryParser):
       kb_user = rdfvalue.KnowledgeBaseUser()
       kb_user.sid = sid_str
       if stat.pathspec.Basename() == "ProfileImagePath":
-        kb_user.homedir = stat.registry_data.GetValue()
+        if stat.resident:
+          # Support old clients.
+          kb_user.homedir = utils.SmartUnicode(stat.resident)
+        else:
+          kb_user.homedir = stat.registry_data.GetValue()
+
         kb_user.userprofile = kb_user.homedir
         try:
           # Assume username is the last component of the path. This is not
@@ -133,6 +177,9 @@ class WinUserSpecialDirs(parsers.RegistryParser):
   output_types = ["KnowledgeBaseUser"]
   supported_artifacts = ["UserShellFolders"]
   process_together = True
+  # Required for environment variable expansion
+  knowledgebase_dependencies = ["environ_systemdrive", "environ_systemroot",
+                                "users.userprofile"]
 
   key_var_mapping = {
       "Shell Folders": {
@@ -145,10 +192,13 @@ class WinUserSpecialDirs(parsers.RegistryParser):
           "Recent": "recent",
           "Startup": "startup",
           "Personal": "personal",
-          },
+      },
       "Environment": {
           "TEMP": "temp",
-          },
+      },
+      "Volatile Environment": {
+          "USERDOMAIN": "userdomain",
+      },
   }
 
   def ParseMultiple(self, stats, knowledge_base):
@@ -187,13 +237,15 @@ class WinServicesParser(parsers.RegistryValueParser):
     http://support.microsoft.com/kb/103000
   """
 
-  output_types = ["ServiceInformation"]
+  output_types = ["WindowsServiceInformation"]
   supported_artifacts = ["WindowsServices"]
   process_together = True
 
   def __init__(self):
+    # The key can be "services" or "Services" on different versions of windows.
     self.service_re = re.compile(
-        r".*HKEY_LOCAL_MACHINE/SYSTEM/[^/]+/services/([^/]+)(/(.*))?$")
+        r".*HKEY_LOCAL_MACHINE/SYSTEM/[^/]+/services/([^/]+)(/(.*))?$",
+        re.IGNORECASE)
     super(WinServicesParser, self).__init__()
 
   def _GetServiceName(self, path):
@@ -203,7 +255,7 @@ class WinServicesParser(parsers.RegistryValueParser):
     return self.service_re.match(path).group(3)
 
   def ParseMultiple(self, stats, knowledge_base):
-    """Parse Service registry keys and return ServiceInformation objects."""
+    """Parse Service registry keys and return WindowsServiceInformation."""
     _ = knowledge_base
     services = {}
     field_map = {"Description": "description",
@@ -225,9 +277,9 @@ class WinServicesParser(parsers.RegistryValueParser):
 
       service_name = self._GetServiceName(stat.pathspec.path)
       reg_key = stat.aff4path.Dirname()
-      services.setdefault(service_name,
-                          rdfvalue.ServiceInformation(name=service_name,
-                                                      registry_key=reg_key))
+      service_info = rdfvalue.WindowsServiceInformation(name=service_name,
+                                                        registry_key=reg_key)
+      services.setdefault(service_name, service_info)
 
       key = self._GetKeyName(stat.pathspec.path)
 
@@ -265,8 +317,8 @@ class WinTimezoneParser(parsers.RegistryValueParser):
     value = stat.registry_data.GetValue()
     result = ZONE_LIST.get(value.strip())
     if not result:
-      raise parsers.ParseError("Unknown value for TimeZoneKeyName key %s" %
-                               value)
+      yield rdfvalue.RDFString("Unknown (%s)" % value.strip())
+
     yield rdfvalue.RDFString(result)
 
 

@@ -35,13 +35,15 @@ class GRRFEServerTest(test_lib.FlowTestsBaseclass):
   """Tests the GRRFEServer."""
   string = "Test String"
 
+  message_expiry_time = 100
+
   def setUp(self):
     """Setup the server."""
     super(GRRFEServerTest, self).setUp()
 
     # Whitelist test flow.
     config_lib.CONFIG.Set("Frontend.well_known_flows", [utils.SmartStr(
-        test_lib.WellKnownSessionTest.well_known_session_id)])
+        test_lib.WellKnownSessionTest.well_known_session_id.FlowName())])
 
     # For tests, small pools are ok.
     config_lib.CONFIG.Set("Threadpool.size", 10)
@@ -50,26 +52,8 @@ class GRRFEServerTest(test_lib.FlowTestsBaseclass):
     self.server = flow.FrontEndServer(
         certificate=config_lib.CONFIG["Frontend.certificate"],
         private_key=config_lib.CONFIG["PrivateKeys.server_key"],
+        message_expiry_time=self.message_expiry_time,
         threadpool_prefix=prefix)
-
-  def CheckMessages(self, left, right):
-    """Compares two lists of messages for equality.
-
-    Args:
-      left: A list of GrrMessage
-      right: A list of (task, GrrMessage)
-
-    Returns:
-      True if they are the same.
-    """
-    if len(right) != len(left):
-      return False
-
-    for i in range(len(right)):
-      if left[i] != right[i][1]:
-        return False
-
-    return True
 
   def testReceiveMessages(self):
     """Test Receiving messages with no status."""
@@ -97,7 +81,7 @@ class GRRFEServerTest(test_lib.FlowTestsBaseclass):
           token=self.token)
 
       stored_message = rdfvalue.GrrMessage(stored_message)
-      self.assertProtoEqual(stored_message, message)
+      self.assertRDFValueEqual(stored_message, message)
 
     return messages
 
@@ -116,7 +100,7 @@ class GRRFEServerTest(test_lib.FlowTestsBaseclass):
     # Now add the status message
     status = rdfvalue.GrrStatus(status=rdfvalue.GrrStatus.ReturnedStatus.OK)
     messages.append(rdfvalue.GrrMessage(
-        request_id=1, response_id=len(messages)+1, task_id=15,
+        request_id=1, response_id=len(messages) + 1, task_id=15,
         session_id=messages[0].session_id, payload=status,
         type=rdfvalue.GrrMessage.Type.STATUS))
 
@@ -135,7 +119,7 @@ class GRRFEServerTest(test_lib.FlowTestsBaseclass):
           token=self.token)
 
       stored_message = rdfvalue.GrrMessage(stored_message)
-      self.assertProtoEqual(stored_message, message)
+      self.assertRDFValueEqual(stored_message, message)
 
   def testWellKnownFlows(self):
     """Make sure that well known flows can run on the front end."""
@@ -256,52 +240,52 @@ class GRRFEServerTest(test_lib.FlowTestsBaseclass):
     # According to throttling logic, requests will only be allowed if
     # the interval between them is 10 / 0.3 = 33.3 seconds
     result = self.server.UpdateAndCheckIfShouldThrottle(70)
-    self.assertEquals(result, True)
+    self.assertEqual(result, True)
 
     result = self.server.UpdateAndCheckIfShouldThrottle(80)
-    self.assertEquals(result, True)
+    self.assertEqual(result, True)
 
     result = self.server.UpdateAndCheckIfShouldThrottle(90)
-    self.assertEquals(result, True)
+    self.assertEqual(result, True)
 
     result = self.server.UpdateAndCheckIfShouldThrottle(100)
-    self.assertEquals(result, False)
+    self.assertEqual(result, False)
 
     result = self.server.UpdateAndCheckIfShouldThrottle(110)
-    self.assertEquals(result, True)
+    self.assertEqual(result, True)
 
     result = self.server.UpdateAndCheckIfShouldThrottle(120)
-    self.assertEquals(result, True)
+    self.assertEqual(result, True)
 
     result = self.server.UpdateAndCheckIfShouldThrottle(130)
-    self.assertEquals(result, True)
+    self.assertEqual(result, True)
 
     result = self.server.UpdateAndCheckIfShouldThrottle(140)
-    self.assertEquals(result, False)
+    self.assertEqual(result, False)
 
     # Now we throttle everything
     self.server.SetThrottleBundlesRatio(0)
 
     result = self.server.UpdateAndCheckIfShouldThrottle(141)
-    self.assertEquals(result, True)
+    self.assertEqual(result, True)
 
     result = self.server.UpdateAndCheckIfShouldThrottle(142)
-    self.assertEquals(result, True)
+    self.assertEqual(result, True)
 
     result = self.server.UpdateAndCheckIfShouldThrottle(143)
-    self.assertEquals(result, True)
+    self.assertEqual(result, True)
 
     # Now we turn throttling off
     self.server.SetThrottleBundlesRatio(None)
 
     result = self.server.UpdateAndCheckIfShouldThrottle(144)
-    self.assertEquals(result, False)
+    self.assertEqual(result, False)
 
     result = self.server.UpdateAndCheckIfShouldThrottle(145)
-    self.assertEquals(result, False)
+    self.assertEqual(result, False)
 
     result = self.server.UpdateAndCheckIfShouldThrottle(146)
-    self.assertEquals(result, False)
+    self.assertEqual(result, False)
 
   def testHandleMessageBundle(self):
     """Check that HandleMessageBundles() requeues messages if it failed.
@@ -344,7 +328,7 @@ class GRRFEServerTest(test_lib.FlowTestsBaseclass):
 
     # The different in eta times reflect the lease that the server took on the
     # client messages.
-    lease_time = (new_tasks[0].eta - tasks[0].eta)/1e6
+    lease_time = (new_tasks[0].eta - tasks[0].eta) / 1e6
 
     # This lease time must be small, as the HandleMessageBundles() call failed,
     # the pending client messages must be put back on the queue.
@@ -352,6 +336,83 @@ class GRRFEServerTest(test_lib.FlowTestsBaseclass):
 
     # Since the server tried to send it, the ttl must be decremented
     self.assertEqual(tasks[0].task_ttl - new_tasks[0].task_ttl, 1)
+
+  def _ScheduleResponseAndStatus(self, client_id, flow_id):
+    with queue_manager.QueueManager(token=self.token) as flow_manager:
+      # Schedule a response.
+      flow_manager.QueueResponse(flow_id, rdfvalue.GrrMessage(
+          source=client_id,
+          session_id=flow_id,
+          payload=rdfvalue.DataBlob(string="Helllo"),
+          request_id=1,
+          response_id=1))
+      # And a STATUS message.
+      flow_manager.QueueResponse(flow_id, rdfvalue.GrrMessage(
+          source=client_id,
+          session_id=flow_id,
+          payload=rdfvalue.GrrStatus(
+              status=rdfvalue.GrrStatus.ReturnedStatus.OK),
+          request_id=1, response_id=2,
+          type=rdfvalue.GrrMessage.Type.STATUS))
+
+  def testHandleClientMessageRetransmission(self):
+    """Check that requests get retransmitted but only if there is no status."""
+    # Make a new fake client
+    client_id = self.SetupClients(1)[0]
+
+    # Test the standard behavior.
+    base_time = 1000
+    msgs_recvd = []
+
+    default_ttl = rdfvalue.GrrMessage().task_ttl
+    with test_lib.FakeTime(base_time):
+      flow.GRRFlow.StartFlow(client_id=client_id, flow_name="SendingFlow",
+                             message_count=1, token=self.token)
+
+    for i in range(default_ttl):
+      with test_lib.FakeTime(base_time + i * (self.message_expiry_time + 1)):
+
+        tasks = self.server.DrainTaskSchedulerQueueForClient(
+            client_id, 100000, rdfvalue.MessageList())
+        msgs_recvd.append(tasks)
+
+    # Should return a client message (ttl-1) times and nothing afterwards.
+    self.assertEqual(map(bool, msgs_recvd),
+                     [True] * (rdfvalue.GrrMessage().task_ttl - 1) + [False])
+
+    # Now we simulate that the workers are overloaded - the client messages
+    # arrive but do not get processed in time.
+    if default_ttl <= 3:
+      self.fail("TTL too low for this test.")
+
+    msgs_recvd = []
+
+    with test_lib.FakeTime(base_time):
+      flow_id = flow.GRRFlow.StartFlow(
+          client_id=client_id, flow_name="SendingFlow",
+          message_count=1, token=self.token)
+
+    for i in range(default_ttl):
+      if i == 2:
+        self._ScheduleResponseAndStatus(client_id, flow_id)
+
+      with test_lib.FakeTime(base_time + i * (self.message_expiry_time + 1)):
+
+        tasks = self.server.DrainTaskSchedulerQueueForClient(
+            client_id, 100000, rdfvalue.MessageList())
+        msgs_recvd.append(tasks)
+
+        if not tasks:
+          # Even if the request has not been leased ttl times yet,
+          # it should be dequeued by now.
+          new_tasks = queue_manager.QueueManager(token=self.token).Query(
+              queue=rdfvalue.ClientURN(client_id).Queue(), limit=1000)
+          self.assertEqual(len(new_tasks), 0)
+
+    # Should return a client message twice and nothing afterwards.
+    self.assertEqual(
+        map(bool, msgs_recvd),
+        [True] * 2 + [False] * (rdfvalue.GrrMessage().task_ttl - 2))
 
 
 def main(args):

@@ -1,5 +1,4 @@
 #!/usr/bin/env python
-# Copyright 2011 Google Inc. All Rights Reserved.
 """RDFValue implementations related to flow scheduling."""
 
 
@@ -12,6 +11,12 @@ import time
 from grr.lib import rdfvalue
 from grr.lib import utils
 from grr.proto import jobs_pb2
+
+
+# Maintaining the reference so that DataObject can be unpickled from old
+# hunts and flows.
+# pylint: disable=invalid-name
+DataObject = utils.DataObject
 
 
 class GrrMessage(rdfvalue.RDFProtoStruct):
@@ -29,7 +34,7 @@ class GrrMessage(rdfvalue.RDFProtoStruct):
   def __init__(self, initializer=None, age=None, payload=None, **kwarg):
     super(GrrMessage, self).__init__(initializer=initializer, age=age, **kwarg)
 
-    if payload:
+    if payload is not None:
       self.payload = payload
 
       # If the payload has a priority, the GrrMessage inherits it.
@@ -104,6 +109,11 @@ class GrrStatus(rdfvalue.RDFProtoStruct):
   rdf_map = dict(cpu_used=rdfvalue.CpuSeconds)
 
 
+class GrrNotification(rdfvalue.RDFProtoStruct):
+  """A flow notification."""
+  protobuf = jobs_pb2.GrrNotification
+
+
 class Backtrace(rdfvalue.RDFString):
   """A special type representing a backtrace."""
 
@@ -123,39 +133,6 @@ class Flow(rdfvalue.RDFProtoStruct):
   # Reference to an AFF4 object where this flow was read from. Note that this
   # is a runtime-only attribute and is not serialized.
   aff4_object = None
-
-
-class DataObject(dict):
-  """This class wraps a dict and provides easier access functions."""
-
-  def Register(self, item, value=None):
-    self[item] = value
-
-  def __setattr__(self, item, value):
-    self[item] = value
-
-  def __getattr__(self, item):
-    try:
-      return self[item]
-    except KeyError as e:
-      raise AttributeError(e)
-
-  def __dir__(self):
-    return sorted(self.keys()) + dir(self.__class__)
-
-  def __str__(self):
-    result = []
-    for k, v in self.items():
-      tmp = "  %s = " % k
-      try:
-        for line in utils.SmartUnicode(v).splitlines():
-          tmp += "    %s\n" % line
-      except Exception as e:  # pylint: disable=broad-except
-        tmp += "Error: %s\n" % e
-
-      result.append(tmp)
-
-    return "{\n%s}\n" % "".join(result)
 
 
 class UnknownObject(object):
@@ -213,7 +190,7 @@ class FlowState(rdfvalue.RDFValue):
   errors = None
 
   def __init__(self, initializer=None, age=None):
-    self.data = DataObject()
+    self.data = utils.DataObject()
     super(FlowState, self).__init__(initializer=initializer, age=age)
 
   def ParseFromString(self, string):
@@ -290,7 +267,8 @@ class Notification(rdfvalue.RDFProtoStruct):
   notification_types = ["Discovery",        # Link to the client object
                         "ViewObject",       # Link to any URN
                         "FlowStatus",       # Link to a flow
-                        "GrantAccess"]      # Link to an access grant page
+                        "GrantAccess",      # Link to an access grant page
+                        "DownloadFile"]     # Directly download a file.
 
 
 class FlowNotification(rdfvalue.RDFProtoStruct):
@@ -326,9 +304,9 @@ class HuntError(rdfvalue.RDFProtoStruct):
   protobuf = jobs_pb2.HuntError
 
 
-class HuntLog(rdfvalue.RDFProtoStruct):
-  """An RDFValue class representing the hunt log entries."""
-  protobuf = jobs_pb2.HuntLog
+class FlowLog(rdfvalue.RDFProtoStruct):
+  """An RDFValue class representing flow log entries."""
+  protobuf = jobs_pb2.FlowLog
 
 
 class HttpRequest(rdfvalue.RDFProtoStruct):
@@ -381,7 +359,7 @@ class Task(rdfvalue.RDFProtoStruct):
 
     self.eta = 0
 
-     # self.value now contains a serialized RDFValue protobuf.
+    # self.value now contains a serialized RDFValue protobuf.
     self.payload = rdfvalue.RDFValueObject(self.value).Payload()
 
     # If the payload has a priority, the task inherits it.
@@ -418,7 +396,7 @@ class Task(rdfvalue.RDFProtoStruct):
   def ParseFromString(self, string):
     super(Task, self).ParseFromString(string)
 
-     # self.value now contains a serialized RDFValue protobuf.
+    # self.value now contains a serialized RDFValue protobuf.
     self.payload = rdfvalue.RDFValueObject(self.value).Payload()
 
   def __str__(self):

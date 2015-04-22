@@ -1,11 +1,10 @@
 #!/usr/bin/env python
 # -*- mode: python; encoding: utf-8 -*-
 
-# Copyright 2012 Google Inc. All Rights Reserved.
 """Test the cron_view interface."""
 
 
-import time
+import mock
 
 from grr.gui import runtests_test
 from grr.lib import aff4
@@ -30,8 +29,10 @@ class TestCronView(test_lib.GRRSeleniumTest):
     super(TestCronView, self).setUp()
 
     with self.ACLChecksDisabled():
-      cronjobs.ScheduleSystemCronFlows(token=self.token)
-      cronjobs.CRON_MANAGER.RunOnce(token=self.token)
+      with mock.patch.object(cronjobs, "GetStartTime", autospec=True,
+                             return_value=rdfvalue.RDFDatetime().Now()):
+        cronjobs.ScheduleSystemCronFlows(token=self.token)
+        cronjobs.CRON_MANAGER.RunOnce(token=self.token)
 
   def testCronView(self):
     self.Open("/")
@@ -274,9 +275,8 @@ class TestCronView(test_lib.GRRSeleniumTest):
     self.WaitUntil(self.IsElementPresent, "css=#_Filesystem > ins.jstree-icon")
     self.Click("css=#_Filesystem > ins.jstree-icon")
 
-    # Click on Fetch Files item in Filesystem flows list
-    self.WaitUntil(self.IsElementPresent, "link=Fetch Files")
-    self.Click("link=Fetch Files")
+    # Click on Find Files item in Filesystem flows list
+    self.Click("link=File Finder")
 
     # Wait for flow configuration form to be rendered (just wait for first
     # input field).
@@ -286,7 +286,6 @@ class TestCronView(test_lib.GRRSeleniumTest):
     # Change "path", "pathtype", "depth" and "ignore_errors" values
     self.Type("css=.Wizard input[id=args-paths-0]", "/tmp")
     self.Select("css=.Wizard select[id=args-pathtype]", "TSK")
-    self.Type("css=.Wizard input[id=args-max_size]", "42")
 
     # Click on "Next" button
     self.Click("css=.Wizard button.Next")
@@ -297,7 +296,7 @@ class TestCronView(test_lib.GRRSeleniumTest):
 
     self.Select("css=.Wizard select[id=output_1-option]",
                 "Send an email for each result.")
-    self.Type("css=.Wizard input[id=output_1-email]",
+    self.Type("css=.Wizard input[id=output_1-email_address]",
               "test@%s" % config_lib.CONFIG["Logging.domain"])
 
     # Click on "Next" button
@@ -358,11 +357,9 @@ $("button:contains('Add Rule')").parent().scrollTop(10000)
     # Check that the arguments summary is present.
     self.assertTrue(self.IsTextPresent("Paths"))
     self.assertTrue(self.IsTextPresent("/tmp"))
-    self.assertTrue(self.IsTextPresent("Max size"))
-    self.assertTrue(self.IsTextPresent("42"))
 
     # Check that output plugins are shown.
-    self.assertTrue(self.IsTextPresent("EmailPlugin"))
+    self.assertTrue(self.IsTextPresent("EmailOutputPlugin"))
     self.assertTrue(self.IsTextPresent("test@%s" %
                                        config_lib.CONFIG["Logging.domain"]))
 
@@ -384,21 +381,19 @@ $("button:contains('Add Rule')").parent().scrollTop(10000)
     self.Click("css=button.Finish")
 
     # Select newly created cron job.
-    self.Click("css=td:contains('cron/CreateGenericHuntFlow_')")
+    self.Click("css=td:contains('cron/CreateAndRunGenericHuntFlow_')")
 
     # Check that correct details are displayed in cron job details tab.
-    self.WaitUntil(self.IsTextPresent, "CreateGenericHuntFlow")
+    self.WaitUntil(self.IsTextPresent, "CreateAndRunGenericHuntFlow")
     self.WaitUntil(self.IsTextPresent, "Flow args")
 
     self.assertTrue(self.IsTextPresent("Paths"))
     self.assertTrue(self.IsTextPresent("/tmp"))
-    self.assertTrue(self.IsTextPresent("Max size"))
-    self.assertTrue(self.IsTextPresent("42"))
 
   def testStuckCronJobIsHighlighted(self):
     # Make sure a lot of time has passed since the last
     # execution
-    with test_lib.Stubber(time, "time", lambda: 0):
+    with test_lib.FakeTime(0):
       self.AddJobStatus("aff4:/cron/OSBreakDown",
                         rdfvalue.CronJobRunStatus.Status.OK)
 
@@ -410,6 +405,7 @@ $("button:contains('Add Rule')").parent().scrollTop(10000)
     # OSBreakDown's row should have a 'warn' class
     self.WaitUntil(self.IsElementPresent,
                    "css=tr.warning td:contains('OSBreakDown')")
+
     # Check that only OSBreakDown is highlighted
     self.WaitUntilNot(self.IsElementPresent,
                       "css=tr.warning td:contains('GRRVersionBreakDown')")
@@ -426,10 +422,10 @@ $("button:contains('Add Rule')").parent().scrollTop(10000)
 
     # OSBreakDown's row should have an 'error' class
     self.WaitUntil(self.IsElementPresent,
-                   "css=tr.error td:contains('OSBreakDown')")
+                   "css=tr.danger td:contains('OSBreakDown')")
     # Check that only OSBreakDown is highlighted
     self.WaitUntilNot(self.IsElementPresent,
-                      "css=tr.error td:contains('GRRVersionBreakDown')")
+                      "css=tr.danger td:contains('GRRVersionBreakDown')")
 
 
 def main(argv):

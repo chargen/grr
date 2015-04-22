@@ -2,15 +2,14 @@
 """This is the GRR frontend HTTP Server."""
 
 
+
 import BaseHTTPServer
 import cgi
 import cStringIO
-
-from multiprocessing import freeze_support
-from multiprocessing import Process
 import pdb
 import socket
 import SocketServer
+import threading
 
 
 import ipaddr
@@ -25,8 +24,10 @@ from grr.lib import communicator
 from grr.lib import config_lib
 from grr.lib import flags
 from grr.lib import flow
+from grr.lib import master
 from grr.lib import rdfvalue
 from grr.lib import startup
+from grr.lib import stats
 from grr.lib import type_info
 from grr.lib import utils
 
@@ -40,6 +41,9 @@ class GRRHTTPServerHandler(BaseHTTPServer.BaseHTTPRequestHandler):
   statustext = {200: "200 OK",
                 406: "406 Not Acceptable",
                 500: "500 Internal Server Error"}
+
+  active_counter_lock = threading.Lock()
+  active_counter = 0
 
   def Send(self, data, status=200, ctype="application/octet-stream",
            last_modified=0):
@@ -83,13 +87,29 @@ class GRRHTTPServerHandler(BaseHTTPServer.BaseHTTPRequestHandler):
     """Process encrypted message bundles."""
     self.Control()
 
+  @stats.Counted("frontend_request_count", fields=["http"])
+  @stats.Timed("frontend_request_latency", fields=["http"])
   def Control(self):
+    """Handle POSTS."""
+    if not master.MASTER_WATCHER.IsMaster():
+      # We shouldn't be getting requests from the client unless we
+      # are the active instance.
+      stats.STATS.IncrementCounter("frontend_inactive_request_count",
+                                   fields=["http"])
+      logging.info("Request sent to inactive frontend from %s",
+                   self.client_address[0])
+
     # Get the api version
     try:
       api_version = int(cgi.parse_qs(self.path.split("?")[1])["api"][0])
     except (ValueError, KeyError, IndexError):
       # The oldest api version we support if not specified.
-      api_version = 2
+      api_version = 3
+
+    with GRRHTTPServerHandler.active_counter_lock:
+      GRRHTTPServerHandler.active_counter += 1
+      stats.STATS.SetGaugeValue("frontend_active_count", self.active_counter,
+                                fields=["http"])
 
     try:
       length = int(self.headers.getheader("content-length"))
@@ -137,6 +157,12 @@ class GRRHTTPServerHandler(BaseHTTPServer.BaseHTTPRequestHandler):
       logging.error("Had to respond with status 500: %s.", e)
       self.Send("Error", status=500)
 
+    finally:
+      with GRRHTTPServerHandler.active_counter_lock:
+        GRRHTTPServerHandler.active_counter -= 1
+        stats.STATS.SetGaugeValue("frontend_active_count", self.active_counter,
+                                  fields=["http"])
+
 
 class GRRHTTPServer(SocketServer.ThreadingMixIn, BaseHTTPServer.HTTPServer):
   """The GRR HTTP frontend server."""
@@ -147,6 +173,9 @@ class GRRHTTPServer(SocketServer.ThreadingMixIn, BaseHTTPServer.HTTPServer):
   address_family = socket.AF_INET6
 
   def __init__(self, server_address, handler, frontend=None, *args, **kwargs):
+    stats.STATS.SetGaugeValue("frontend_max_active_count",
+                              self.request_queue_size)
+
     if frontend:
       self.frontend = frontend
     else:
@@ -195,10 +224,6 @@ def main(unused_argv):
   startup.Init()
 
   httpd = CreateServer()
-  if config_lib.CONFIG["Frontend.processes"] > 1:
-    # Multiprocessing
-    for _ in range(config_lib.CONFIG["Frontend.processes"] - 1):
-      Process(target=Serve, args=(httpd,)).start()
 
   try:
     httpd.serve_forever()
@@ -206,5 +231,4 @@ def main(unused_argv):
     print "Caught keyboard interrupt, stopping"
 
 if __name__ == "__main__":
-  freeze_support()
   flags.StartMain(main)

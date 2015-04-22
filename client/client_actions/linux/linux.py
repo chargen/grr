@@ -20,7 +20,6 @@ from grr.lib import config_lib
 from grr.lib import rdfvalue
 from grr.lib import utils
 
-
 # struct sockaddr_ll
 #   {
 #     unsigned short int sll_family;
@@ -43,7 +42,7 @@ class Sockaddrll(ctypes.Structure):
       ("sll_pkttype", ctypes.c_ubyte),
       ("sll_halen", ctypes.c_ubyte),
       ("sll_addr", ctypes.c_ubyte * 8),
-      ]
+  ]
 
 # struct sockaddr_in {
 #   sa_family_t           sin_family;     /* Address family               */
@@ -62,7 +61,7 @@ class Sockaddrin(ctypes.Structure):
       ("sin_port", ctypes.c_ushort),
       ("sin_addr", ctypes.c_ubyte * 4),
       ("sin_zero", ctypes.c_char * 8)
-      ]
+  ]
 
 # struct sockaddr_in6 {
 #         unsigned short int      sin6_family;    /* AF_INET6 */
@@ -81,7 +80,7 @@ class Sockaddrin6(ctypes.Structure):
       ("sin6_flowinfo", ctypes.c_ubyte * 4),
       ("sin6_addr", ctypes.c_ubyte * 16),
       ("sin6_scope_id", ctypes.c_ubyte * 4)
-      ]
+  ]
 
 
 # struct ifaddrs   *ifa_next;         /* Pointer to next struct */
@@ -106,7 +105,7 @@ Ifaddrs._fields_ = [  # pylint: disable=protected-access
     ("ifa_broadaddr", ctypes.POINTER(ctypes.c_char)),
     ("ifa_destaddr", ctypes.POINTER(ctypes.c_char)),
     ("ifa_data", ctypes.POINTER(ctypes.c_char))
-    ]
+]
 
 
 class EnumerateInterfaces(actions.ActionPlugin):
@@ -193,17 +192,28 @@ class UtmpStruct(utils.Struct):
       ("i", "tv_usec"),
       ("4i", "ut_addr_v6"),
       ("20s", "unused"),
-      ]
+  ]
 
 
 class EnumerateUsers(actions.ActionPlugin):
-  """Enumerates all the users on this system."""
-  out_rdfvalue = rdfvalue.User
+  """Enumerates all the users on this system.
+
+  While wtmp can be collected and parsed server-side using artifacts, we keep
+  this client action to avoid collecting every wtmp on every interrogate, and to
+  allow for the metadata (homedir) expansion to occur on the client, where we
+  have access to LDAP.
+
+  This client action used to return rdfvalue.User.  To allow for backwards
+  compatibility we expect it to be called via the LinuxUserProfiles artifact and
+  we convert User to KnowledgeBaseUser in the artifact parser on the server.
+  """
+  out_rdfvalue = rdfvalue.KnowledgeBaseUser
 
   def ParseWtmp(self):
     """Parse wtmp and extract the last logon time."""
     users = {}
 
+    wtmp_struct_size = UtmpStruct.GetSize()
     for filename in sorted(os.listdir("/var/log")):
       if filename.startswith("wtmp"):
         try:
@@ -211,13 +221,12 @@ class EnumerateUsers(actions.ActionPlugin):
         except IOError:
           continue
 
-        while wtmp:
+        for offset in xrange(0, len(wtmp), wtmp_struct_size):
           try:
-            record = UtmpStruct(wtmp)
+            record = UtmpStruct(wtmp[offset:offset + wtmp_struct_size])
           except RuntimeError:
             break
 
-          wtmp = wtmp[record.size:]
           # Users only appear for USER_PROCESS events, others are system.
           if record.ut_type != 7:
             continue
@@ -255,7 +264,7 @@ class EnumerateUsers(actions.ActionPlugin):
         self.SendReply(username=utils.SmartUnicode(username),
                        homedir=utils.SmartUnicode(homedir),
                        full_name=utils.SmartUnicode(full_name),
-                       last_logon=last_login*1000000)
+                       last_logon=last_login * 1000000)
 
 
 class EnumerateFilesystems(actions.ActionPlugin):
@@ -442,16 +451,9 @@ class GetMemoryInformation(actions.ActionPlugin):
 class UpdateAgent(standard.ExecuteBinaryCommand):
   """Updates the GRR agent to a new version."""
 
-  in_rdfvalue = rdfvalue.ExecuteBinaryRequest
-  out_rdfvalue = rdfvalue.ExecuteBinaryResponse
+  suffix = "deb"
 
-  def Run(self, args):
-    """Run."""
-    pub_key = config_lib.CONFIG["Client.executable_signing_public_key"]
-    if not args.executable.Verify(pub_key):
-      raise OSError("Executable signing failure.")
-
-    path = self.WriteBlobToFile(args.executable, args.write_path, ".deb")
+  def ProcessFile(self, path, args):
 
     cmd = "/usr/bin/dpkg"
     cmd_args = ["-i", path]

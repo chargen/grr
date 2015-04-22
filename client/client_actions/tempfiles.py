@@ -15,8 +15,10 @@ import threading
 
 from grr.client import actions
 from grr.client import client_utils
+from grr.client.vfs_handlers import files
 from grr.lib import config_lib
 from grr.lib import rdfvalue
+from grr.lib import utils
 
 
 class Error(Exception):
@@ -31,7 +33,8 @@ class ErrorNotTempFile(Error):
   """Attempt to delete a file that isn't a GRR tempfile."""
 
 
-def CreateGRRTempFile(directory=None, lifetime=0, suffix=""):
+def CreateGRRTempFile(directory=None, filename=None, lifetime=0, mode="w+b",
+                      suffix=""):
   """Open file with GRR prefix in directory to allow easy deletion.
 
   Missing parent dirs will be created. If an existing directory is specified
@@ -50,15 +53,27 @@ def CreateGRRTempFile(directory=None, lifetime=0, suffix=""):
     directory: string representing absolute directory where file should be
                written. If None, use 'tmp' under the directory we're running
                from.
+
+    filename: The name of the file to use. Note that setting both filename and
+       directory name is not allowed.
+
     lifetime: time in seconds before we should delete this tempfile.
+
+    mode: The mode to open the file.
+
     suffix: optional suffix to use for the temp file
+
   Returns:
     Python file object
+
   Raises:
     OSError: on permission denied
     ErrorBadPath: if path is not absolute
     ValueError: if Client.tempfile_prefix is undefined in the config.
   """
+  if filename and directory:
+    raise ErrorBadPath("Providing both filename and directory name forbidden.")
+
   if not directory:
     directory = config_lib.CONFIG["Client.tempdir"]
 
@@ -76,8 +91,14 @@ def CreateGRRTempFile(directory=None, lifetime=0, suffix=""):
       os.chmod(directory, stat.S_IXUSR | stat.S_IRUSR | stat.S_IWUSR)
 
   prefix = config_lib.CONFIG.Get("Client.tempfile_prefix")
-  outfile = tempfile.NamedTemporaryFile(prefix=prefix, suffix=suffix,
-                                        dir=directory, delete=False)
+  if filename is None:
+    outfile = tempfile.NamedTemporaryFile(prefix=prefix, suffix=suffix,
+                                          dir=directory, delete=False)
+  else:
+    if suffix:
+      filename = "%s.%s" % (filename, suffix)
+
+    outfile = open(os.path.join(directory, filename), mode)
 
   if lifetime > 0:
     cleanup = threading.Timer(lifetime, DeleteGRRTempFile, (outfile.name,))
@@ -96,8 +117,8 @@ def CreateGRRTempFile(directory=None, lifetime=0, suffix=""):
 def DeleteGRRTempFile(path):
   """Delete a GRR temp file.
 
-  To limit possible damage the path must be absolute and only files beginning
-  with Client.tempfile_prefix can be deleted.
+  To limit possible damage the path must be absolute and either the file must be
+  within Client.tempdir or the file name must begin with Client.tempfile_prefix.
 
   Args:
     path: path string to file to be deleted.
@@ -110,12 +131,16 @@ def DeleteGRRTempFile(path):
   if not os.path.isabs(path):
     raise ErrorBadPath("Path must be absolute")
 
-  prefix = config_lib.CONFIG.Get("Client.tempfile_prefix")
-  if not os.path.basename(path).startswith(prefix):
-    msg = "Can't delete %s, filename must start with %s"
-    raise ErrorNotTempFile(msg % (path, prefix))
+  prefix = config_lib.CONFIG["Client.tempfile_prefix"]
+  directory = config_lib.CONFIG["Client.tempdir"]
+  if not (os.path.basename(path).startswith(prefix) or
+          os.path.commonprefix([directory, path]) == directory):
+    msg = "Can't delete %s. Filename must start with %s or lie within %s."
+    raise ErrorNotTempFile(msg % (path, prefix, directory))
 
   if os.path.exists(path):
+    # Clear our file handle cache so the file can be deleted.
+    files.FILE_HANDLE_CACHE.Flush()
     os.remove(path)
 
 
@@ -140,8 +165,12 @@ class DeleteGRRTempFiles(actions.ActionPlugin):
     Raises:
       ErrorBadPath: if path doesn't exist or is not a regular file or directory
     """
+
+    # Normalize the path, so DeleteGRRTempFile can correctly check if
+    # it is within Client.tempdir.
     if args.path:
-      path = args.path
+      path = client_utils.CanonicalPathToLocalPath(
+          utils.NormalizePath(args.path))
     else:
       path = config_lib.CONFIG["Client.tempdir"]
 

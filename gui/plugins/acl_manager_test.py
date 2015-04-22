@@ -4,17 +4,21 @@
 """Tests the access control authorization workflow."""
 
 
+import re
 import time
+import urlparse
 
 from grr.gui import runtests_test
 
 from grr.lib import access_control
 from grr.lib import aff4
+from grr.lib import email_alerts
 from grr.lib import flags
 from grr.lib import flow
 from grr.lib import hunts
 from grr.lib import rdfvalue
 from grr.lib import test_lib
+from grr.lib import utils
 from grr.lib.aff4_objects import cronjobs
 
 
@@ -53,7 +57,7 @@ class TestACLWorkflow(test_lib.GRRSeleniumTest):
   def testClientACLWorkflow(self):
     self.Open("/")
 
-    self.Type("client_query", "0001")
+    self.Type("client_query", "C.0000000000000001")
     self.Click("client_query_submit")
 
     self.WaitUntilEqual(u"C.0000000000000001",
@@ -126,6 +130,75 @@ class TestACLWorkflow(test_lib.GRRSeleniumTest):
     self.WaitUntilContains("aff4:/C.0000000000000001/fs",
                            self.GetText, "css=h3:contains('fs')")
 
+    # One email for the original request and one for each approval.
+    self.assertEqual(len(self.emails_sent), 3)
+
+  def testRecentReasonBox(self):
+    test_reason = u"ástæða"
+    self.Open("/")
+    with self.ACLChecksDisabled():
+      token = access_control.ACLToken(
+          username="test",
+          reason=test_reason)
+      self.GrantClientApproval("C.0000000000000006", token=token)
+
+    self.Type("client_query", "C.0000000000000006")
+    self.Click("client_query_submit")
+
+    self.WaitUntilEqual(u"C.0000000000000006",
+                        self.GetText, "css=span[type=subject]")
+
+    # Choose client 6
+    self.Click("css=td:contains('0006')")
+
+    self.WaitUntil(self.IsTextPresent, u"Access reason: %s" % test_reason)
+
+    # By now we should have a recent reason set, let's see if it shows up in the
+    # ACL dialog.
+
+    self.Type("client_query", "C.0000000000000001")
+    self.Click("client_query_submit")
+
+    self.WaitUntilEqual(u"C.0000000000000001",
+                        self.GetText, "css=span[type=subject]")
+
+    # Choose client 1
+    self.Click("css=td:contains('0001')")
+
+    # This should be rejected now and a form request is made.
+    self.WaitUntil(self.IsElementPresent,
+                   "css=h3:contains('Create a new approval')")
+
+    options = self.GetText("css=select[id=acl_recent_reasons]").split("\n")
+    self.assertEqual(len(options), 2)
+    self.assertEqual(options[0].strip(), "Enter New Reason...")
+    self.assertEqual(options[1].strip(), test_reason)
+
+    # The reason text box should be there and enabled.
+    element = self.GetElement("css=input[id=acl_reason]")
+    self.assertTrue(element.is_enabled())
+
+    self.Select("css=select[id=acl_recent_reasons]", test_reason)
+
+    # Make sure clicking the recent reason greys out the reason text box.
+    element = self.GetElement("css=input[id=acl_reason]")
+    self.assertFalse(element.is_enabled())
+
+    # Ok now submit this.
+    self.Type("css=input[id=acl_approver]", "test")
+    self.ClickUntilNotVisible("acl_dialog_submit")
+
+    # And make sure the approval was created...
+    fd = aff4.FACTORY.Open("aff4:/ACL/C.0000000000000001/test",
+                           token=self.token)
+    approvals = list(fd.ListChildren())
+
+    self.assertEqual(len(approvals), 1)
+
+    # ... using the correct reason.
+    self.assertEqual(
+        utils.SmartUnicode(approvals[0].Basename().decode("base64")),
+        test_reason)
 
   def testHuntACLWorkflow(self):
     with self.ACLChecksDisabled():
@@ -175,7 +248,7 @@ class TestACLWorkflow(test_lib.GRRSeleniumTest):
     self.WaitUntil(self.IsTextPresent, "SampleHunt")
     self.WaitUntil(self.IsTextPresent, "Hunt ID")
     self.WaitUntil(self.IsTextPresent, "Hunt URN")
-    self.WaitUntil(self.IsTextPresent, "Client Count")
+    self.WaitUntil(self.IsTextPresent, "Clients Scheduled")
 
     self.Click("css=button:contains('Approve')")
     self.WaitUntil(self.IsTextPresent,
@@ -240,7 +313,7 @@ class TestACLWorkflow(test_lib.GRRSeleniumTest):
 
     # Let's make "approver" an admin.
     with self.ACLChecksDisabled():
-      self.MakeUserAdmin("approver")
+      self.CreateAdminUser("approver")
 
     # And try again
     self.Open("/")
@@ -269,7 +342,7 @@ class TestACLWorkflow(test_lib.GRRSeleniumTest):
           token=access_control.ACLToken(username="otheruser"))
       hunt2_id = self.CreateSampleHunt(
           token=access_control.ACLToken(username="test"))
-      self.MakeUserAdmin("approver")
+      self.CreateAdminUser("approver")
 
     token = access_control.ACLToken(username="otheruser")
     flow.GRRFlow.StartFlow(flow_name="RequestHuntApprovalFlow",
@@ -305,7 +378,7 @@ class TestACLWorkflow(test_lib.GRRSeleniumTest):
     self.WaitUntil(self.IsTextPresent, "SampleHunt")
 
     #
-    # Check that test user can't start/pause/modify hunt1.
+    # Check that test user can't start/stop/modify hunt1.
     #
     self.Click("css=tr:contains('SampleHunt') td:contains('otheruser')")
 
@@ -327,7 +400,7 @@ class TestACLWorkflow(test_lib.GRRSeleniumTest):
     # Wait for dialog to disappear.
     self.WaitUntilNot(self.IsVisible, "css=.modal-backdrop")
     self.WaitUntil(self.IsElementPresent,
-                   "css=button[name=ModifyHunt][!disabled]")
+                   "css=button[name=ModifyHunt]:not([disabled])")
 
     # Modify hunt
 
@@ -348,7 +421,7 @@ class TestACLWorkflow(test_lib.GRRSeleniumTest):
     self.WaitUntilNot(self.IsVisible, "css=.modal-backdrop")
 
     #
-    # Check that test user can start/pause/modify hunt2.
+    # Check that test user can start/stop/modify hunt2.
     #
     self.Click("css=tr:contains('SampleHunt') td:contains('test')")
 
@@ -363,34 +436,34 @@ class TestACLWorkflow(test_lib.GRRSeleniumTest):
     # Also check that "Proceed" button gets disabled.
     self.Click("css=button[name=Proceed]")
     self.WaitUntil(self.IsTextPresent, "Hunt started successfully")
-    self.assertTrue(self.IsElementPresent,
-                    "css=button[name=Proceed][disabled!='']")
+    self.assertTrue(self.IsElementPresent(
+        "css=button[name=Proceed][disabled!='']"))
 
     # Click on "Cancel" and check that dialog disappears.
     self.Click("css=button[name=Cancel]")
     self.WaitUntilNot(self.IsVisible, "css=.modal-backdrop")
     self.WaitUntil(self.IsElementPresent,
-                   "css=button[name=PauseHunt][!disabled]")
+                   "css=button[name=StopHunt]:not([disabled])")
 
-    # Pause hunt
+    # Stop hunt
 
-    # Click on Pause and wait for dialog again.
-    self.Click("css=button[name=PauseHunt]")
+    # Click on Stop and wait for dialog again.
+    self.Click("css=button[name=StopHunt]")
     self.WaitUntil(self.IsTextPresent,
-                   "Are you sure you want to pause this hunt?")
+                   "Are you sure you want to stop this hunt?")
 
     # Click on "Proceed" and wait for success label to appear.
     # Also check that "Proceed" button gets disabled.
     self.Click("css=button[name=Proceed]")
-    self.WaitUntil(self.IsTextPresent, "Hunt paused successfully")
-    self.assertTrue(self.IsElementPresent,
-                    "css=button[name=Proceed][disabled!='']")
+    self.WaitUntil(self.IsTextPresent, "Hunt stopped successfully")
+    self.assertTrue(self.IsElementPresent(
+        "css=button[name=Proceed][disabled!='']"))
 
     # Click on "Cancel" and check that dialog disappears.
     self.Click("css=button[name=Cancel]")
     self.WaitUntilNot(self.IsVisible, "css=.modal-backdrop")
     self.WaitUntil(self.IsElementPresent,
-                   "css=button[name=ModifyHunt][!disabled]")
+                   "css=button[name=ModifyHunt]:not([disabled])")
 
     # Modify hunt
 
@@ -403,8 +476,8 @@ class TestACLWorkflow(test_lib.GRRSeleniumTest):
     # Also check that "Proceed" button gets disabled.
     self.Click("css=button[name=Proceed]")
     self.WaitUntil(self.IsTextPresent, "Hunt modified successfully!")
-    self.assertTrue(self.IsElementPresent,
-                    "css=button[name=Proceed][disabled!='']")
+    self.assertTrue(self.IsElementPresent(
+        "css=button[name=Proceed][disabled!='']"))
 
     # Click on "Cancel" and check that dialog disappears.
     self.Click("css=button[name=Cancel]")
@@ -519,7 +592,7 @@ class TestACLWorkflow(test_lib.GRRSeleniumTest):
 
     # Let's make "approver" an admin.
     with self.ACLChecksDisabled():
-      self.MakeUserAdmin("approver")
+      self.CreateAdminUser("approver")
 
     # And try again
     self.Open("/")
@@ -538,6 +611,40 @@ class TestACLWorkflow(test_lib.GRRSeleniumTest):
     self.Click("css=button[name=Proceed]")
 
     self.WaitUntil(self.IsTextPresent, "Cron job was ENABLEd successfully!")
+
+  def testEmailClientApprovalRequestLinkLeadsToACorrectPage(self):
+    with self.ACLChecksDisabled():
+      client_id = self.SetupClients(1)[0]
+
+    messages_sent = []
+
+    def SendEmailStub(unused_from_user, unused_to_user, unused_subject,
+                      message, **unused_kwargs):
+      messages_sent.append(message)
+
+    # Request client approval, it will trigger an email message.
+    with utils.Stubber(email_alerts, "SendEmail", SendEmailStub):
+      flow.GRRFlow.StartFlow(client_id=client_id,
+                             flow_name="RequestClientApprovalFlow",
+                             reason="Please please let me",
+                             subject_urn=client_id,
+                             approver="test",
+                             token=rdfvalue.ACLToken(username="iwantapproval",
+                                                     reason="test"))
+    self.assertEqual(len(messages_sent), 1)
+
+    # Extract link from the message text and open it.
+    m = re.search(r"href='(.+?)'", messages_sent[0], re.MULTILINE)
+    link = urlparse.urlparse(m.group(1))
+    self.Open(link.path + "?" + link.query + "#" + link.fragment)
+
+    # Check that requestor's username and  reason are correctly displayed.
+    self.WaitUntil(self.IsTextPresent, "iwantapproval")
+    self.WaitUntil(self.IsTextPresent, "Please please let me")
+    # Check that host information is displayed.
+    self.WaitUntil(self.IsTextPresent, str(client_id))
+    self.WaitUntil(self.IsTextPresent, "HOSTNAME")
+    self.WaitUntil(self.IsTextPresent, "MAC_ADDRESS")
 
 
 def main(argv):

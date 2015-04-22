@@ -67,7 +67,7 @@ class PEMPublicKey(rdfvalue.RDFString):
 
       return rsa
     except RSA.RSAError as e:
-      raise type_info.TypeValueError("Public key invalid." % e)
+      raise type_info.TypeValueError("Public key invalid: %s" % e)
 
   def ParseFromString(self, pem_string):
     super(PEMPublicKey, self).ParseFromString(pem_string)
@@ -210,10 +210,10 @@ class EncryptionKey(rdfvalue.RDFBytes):
 
   def Generate(self):
     self._value = ""
-    while len(self._value) < self.length/8:
+    while len(self._value) < self.length / 8:
       self._value += struct.pack("=L", utils.PRNG.GetULong())
 
-    self._value = self._value[:self.length/8]
+    self._value = self._value[:self.length / 8]
     return self
 
   def RawBytes(self):

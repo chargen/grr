@@ -39,46 +39,20 @@ class StructGrrMessage(rdfvalue.RDFProtoStruct):
           name="source", field_number=6,
           description=("Client name where the message came from (This is "
                        "copied from the MessageList)")),
-      )
+  )
 
 
-class FastVolatilityValue(rdfvalue.RDFProtoStruct):
-  type_description = type_info.TypeDescriptorSet(
-      type_info.ProtoString(
-          name="type", field_number=1),
-
-      type_info.ProtoString(
-          name="name", field_number=2),
-
-      type_info.ProtoUnsignedInteger(
-          name="offset", field_number=3),
-
-      type_info.ProtoString(
-          name="vm", field_number=4),
-
-      type_info.ProtoUnsignedInteger(
-          name="value", field_number=5),
-
-      type_info.ProtoString(
-          name="svalue", field_number=6),
-
-      type_info.ProtoString(
-          name="reason", field_number=7),
-
-      )
-
-
-class FastVolatilityValues(rdfvalue.RDFProtoStruct):
-  """A Faster implementation of VolatilityValues."""
+class FastGrrMessageList(rdfvalue.RDFProtoStruct):
+  """A Faster implementation of GrrMessageList."""
 
   type_description = type_info.TypeDescriptorSet(
       type_info.ProtoList(type_info.ProtoEmbedded(
-          name="values", field_number=1,
-          nested=FastVolatilityValue))
-      )
+          name="job", field_number=1,
+          nested=StructGrrMessage))
+  )
 
 
-class RDFValueBenchmark(test_lib.MicroBenchmarks):
+class RDFValueBenchmark(test_lib.AverageMicroBenchmarks):
   """Microbenchmark tests for RDFProtos."""
 
   REPEATS = 1000
@@ -167,21 +141,21 @@ class RDFValueBenchmark(test_lib.MicroBenchmarks):
     """Test decoding of repeated fields."""
 
     repeats = self.REPEATS / 50
-    s = jobs_pb2.VolatilityValues()
+    s = jobs_pb2.MessageList()
     for i in range(self.REPEATS):
-      s.values.add(type="test", name="foobar", value=i)
+      s.job.add(session_id="test", name="foobar", request_id=i)
 
     test_data = s.SerializeToString()
 
     def ProtoDecode():
-      s = jobs_pb2.VolatilityValues()
+      s = jobs_pb2.MessageList()
       s.ParseFromString(test_data)
 
-      self.assertEqual(s.values[100].value, 100)
+      self.assertEqual(s.job[100].request_id, 100)
 
     def SProtoDecode():
-      s = FastVolatilityValues(test_data)
-      self.assertEqual(s.values[100].value, 100)
+      s = FastGrrMessageList(test_data)
+      self.assertEqual(s.job[100].request_id, 100)
 
     self.TimeIt(SProtoDecode, "SProto Repeated Decode",
                 repetitions=repeats)
@@ -195,17 +169,17 @@ class RDFValueBenchmark(test_lib.MicroBenchmarks):
     repeats = self.REPEATS / 50
 
     def ProtoCreateAndSerialize():
-      s = jobs_pb2.VolatilityValues()
+      s = jobs_pb2.MessageList()
       for i in range(self.REPEATS):
-        s.values.add(type="test", name="foobar", value=i)
+        s.job.add(session_id="test", name="foobar", request_id=i)
 
       return len(s.SerializeToString())
 
     def RDFStructCreateAndSerialize():
-      s = FastVolatilityValues()
+      s = FastGrrMessageList()
 
       for i in range(self.REPEATS):
-        s.values.Append(type="test", name="foobar", value=i)
+        s.job.Append(session_id="test", name="foobar", request_id=i)
 
       return len(s.SerializeToString())
 
@@ -217,16 +191,16 @@ class RDFValueBenchmark(test_lib.MicroBenchmarks):
 
     # Check that we can unserialize a protobuf encoded using the standard
     # library.
-    s = jobs_pb2.VolatilityValues()
+    s = jobs_pb2.MessageList()
     for i in range(self.REPEATS):
-      s.values.add(type="test", name="foobar", value=i)
+      s.job.add(session_id="test", name="foobar", request_id=i)
 
     serialized = s.SerializeToString()
-    unserialized = FastVolatilityValues(serialized)
-    self.assertEqual(len(unserialized.values), len(s.values))
+    unserialized = FastGrrMessageList(serialized)
+    self.assertEqual(len(unserialized.job), len(s.job))
 
-    self.assertEqual(unserialized.values[134].type, "test")
-    self.assertEqual(unserialized.values[100].value, 100)
+    self.assertEqual(unserialized.job[134].session_id, "test")
+    self.assertEqual(unserialized.job[100].request_id, 100)
 
   def testDecode(self):
     """Test decoding performance."""

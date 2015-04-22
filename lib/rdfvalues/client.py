@@ -11,6 +11,7 @@ import re
 import socket
 import stat
 
+from grr.lib import ipv6_utils
 from grr.lib import rdfvalue
 from grr.lib import type_info
 from grr.lib import utils
@@ -29,13 +30,38 @@ class ClientURN(rdfvalue.RDFURN):
   """A client urn has to have a specific form."""
 
   # Valid client urns must match this expression.
-  CLIENT_ID_RE = re.compile(r"^(aff4:/)?C\.[0-9a-fA-F]{16}$")
+  CLIENT_ID_RE = re.compile(r"^(aff4:/)?(?P<clientid>(c|C)\.[0-9a-fA-F]{16})$")
+
+  def __init__(self, initializer=None, age=None):
+    if isinstance(initializer, rdfvalue.RDFURN):
+      # pylint: disable=protected-access
+      if not self.Validate(initializer._string_urn):
+        raise type_info.TypeValueError(
+            "Client urn malformed: %s" % initializer)
+      # pylint: enable=protected-access
+    super(ClientURN, self).__init__(initializer=initializer, age=age)
 
   def ParseFromString(self, value):
+    """Parse a string into a client URN.
+
+    Convert case so that all URNs are of the form C.[0-9a-f].
+
+    Args:
+      value: string value to parse
+    """
+    value = value.strip()
+
     if not self.Validate(value):
       raise type_info.TypeValueError("Client urn malformed: %s" % value)
 
-    return super(ClientURN, self).ParseFromString(value)
+    match = self.CLIENT_ID_RE.match(value)
+
+    clientid = match.group("clientid")
+    clientid_correctcase = "".join((clientid[0].upper(), clientid[1:].lower()))
+
+    value = value.replace(clientid, clientid_correctcase, 1)
+
+    super(ClientURN, self).ParseFromString(value)
 
   @classmethod
   def Validate(cls, value):
@@ -79,6 +105,16 @@ class ClientURN(rdfvalue.RDFURN):
     return self.Add("tasks")
 
 
+def GetClientURNFromPath(path):
+  """Extracts the Client id from the path, if it is present."""
+
+  # Make sure that the first component of the path looks like a client.
+  try:
+    return ClientURN(path.split("/")[1])
+  except (type_info.TypeValueError, IndexError):
+    return None
+
+
 # These are objects we store as attributes of the client.
 class Filesystem(structs.RDFProtoStruct):
   """A filesystem on the client.
@@ -119,6 +155,8 @@ class User(rdfvalue.RDFProtoStruct):
       "domain": "userdomain",
       "homedir": "homedir",
       "sid": "sid",
+      "full_name": "full_name",
+      "last_logon": "last_logon",
       "special_folders.cookies": "cookies",
       "special_folders.local_settings": "local_settings",
       "special_folders.local_app_data": "localappdata",
@@ -139,8 +177,22 @@ class User(rdfvalue.RDFProtoStruct):
         val = getattr(getattr(self, attr), old_pb_name)
       else:
         val = getattr(self, old_pb_name)
-      kb_user.Set(new_pb_name, val)
+      if val:
+        kb_user.Set(new_pb_name, val)
     return kb_user
+
+  def FromKnowledgeBaseUser(self, kbuser):
+    """Convert a KnowledgeBaseUser into a User value."""
+    folders = rdfvalue.FolderInformation()
+    for old_pb_name, new_pb_name in self.kb_user_mapping.items():
+      val = getattr(kbuser, new_pb_name)
+      if val:
+        if len(old_pb_name.split(".")) > 1:
+          folders.Set(old_pb_name.split(".")[1], val)
+        else:
+          self.Set(old_pb_name, val)
+    self.Set("special_folders", folders)
+    return self
 
 
 class Users(protodict.RDFValueArray):
@@ -152,6 +204,10 @@ class KnowledgeBase(rdfvalue.RDFProtoStruct):
   """Information about the system and users."""
   protobuf = knowledge_base_pb2.KnowledgeBase
 
+  def _CreateNewUser(self, kb_user):
+    self.users.Append(kb_user)
+    return ["users.%s" % k for k in kb_user.AsDict().keys()]
+
   def MergeOrAddUser(self, kb_user):
     """Merge a user into existing users or add new if it doesn't exist.
 
@@ -161,13 +217,13 @@ class KnowledgeBase(rdfvalue.RDFProtoStruct):
     Returns:
       A list of strings with the set attribute names, e.g. ["users.sid"]
     """
+
     user = self.GetUser(sid=kb_user.sid, uid=kb_user.uid,
                         username=kb_user.username)
     new_attrs = []
     merge_conflicts = []    # Record when we overwrite a value.
     if not user:
-      self.users.Append(kb_user)
-      new_attrs = ["users.%s" % k for k in kb_user.AsDict().keys()]
+      new_attrs = self._CreateNewUser(kb_user)
     else:
       for key, val in kb_user.AsDict().items():
         if user.Get(key) and user.Get(key) != val:
@@ -178,11 +234,33 @@ class KnowledgeBase(rdfvalue.RDFProtoStruct):
     return new_attrs, merge_conflicts
 
   def GetUser(self, sid=None, uid=None, username=None):
-    """Retrieve a KnowledgeBaseUser based on sid, uid or username."""
+    """Retrieve a KnowledgeBaseUser based on sid, uid or username.
+
+    On windows we first get a SID and use it to find the username.  We want to
+    avoid combining users with name collisions, which occur when local users
+    have the same username as domain users (something like Admin is particularly
+    common).  So if a SID is provided, don't also try to match by username.
+
+    On linux we first get a username, then use this to find the UID, so we want
+    to combine these records or we end up with multiple partially-filled user
+    records.
+
+    TODO(user): this won't work at all well with a query for uid=0 because
+    that is also the default for KnowledgeBaseUser objects that don't have uid
+    set.
+
+    Args:
+      sid: Windows user sid
+      uid: Linux/Darwin user id
+      username: string
+    Returns:
+      rdfvalue.KnowledgeBaseUser or None
+    """
     if sid:
       for user in self.users:
         if user.sid == sid:
           return user
+      return None
     if uid:
       for user in self.users:
         if user.uid == uid:
@@ -190,13 +268,19 @@ class KnowledgeBase(rdfvalue.RDFProtoStruct):
     if username:
       for user in self.users:
         if user.username == username:
-          return user
+          # Make sure we aren't combining different uids if we know them
+          # user.uid = 0 is the default, which makes this more complicated.
+          if uid and user.uid and user.uid != uid:
+            return None
+          else:
+            return user
 
   def GetKbFieldNames(self):
-    fields = self.type_infos.descriptor_names
+    fields = set(self.type_infos.descriptor_names)
+    fields.remove("users")
     for field in self.users.type_descriptor.type.type_infos.descriptor_names:
-      fields.append("users.%s" % field)
-    return fields
+      fields.add("users.%s" % field)
+    return sorted(fields)
 
 
 class KnowledgeBaseUser(rdfvalue.RDFProtoStruct):
@@ -219,7 +303,12 @@ class Connections(protodict.RDFValueArray):
 
 
 class NetworkAddress(rdfvalue.RDFProtoStruct):
-  """A network address."""
+  """A network address.
+
+  We'd prefer to use socket.inet_pton and  inet_ntop here, but they aren't
+  available on windows before python 3.4. So we use the older IPv4 functions for
+  v4 addresses and our own pure python implementations for IPv6.
+  """
   protobuf = jobs_pb2.NetworkAddress
 
   @property
@@ -229,11 +318,27 @@ class NetworkAddress(rdfvalue.RDFProtoStruct):
     else:
       try:
         if self.address_type == rdfvalue.NetworkAddress.Family.INET:
-          return socket.inet_ntop(socket.AF_INET, self.packed_bytes)
+          return socket.inet_ntoa(self.packed_bytes)
         else:
-          return socket.inet_ntop(socket.AF_INET6, self.packed_bytes)
+          return ipv6_utils.InetNtoA(self.packed_bytes)
       except ValueError as e:
         return str(e)
+
+  @human_readable_address.setter
+  def human_readable_address(self, value):
+    if ":" in value:
+      # IPv6
+      self.address_type = rdfvalue.NetworkAddress.Family.INET6
+      self.packed_bytes = ipv6_utils.InetAtoN(value)
+    else:
+      # IPv4
+      self.address_type = rdfvalue.NetworkAddress.Family.INET
+      self.packed_bytes = socket.inet_aton(value)
+
+
+class DNSClientConfiguration(rdfvalue.RDFProtoStruct):
+  """DNS client config."""
+  protobuf = sysinfo_pb2.DNSClientConfiguration
 
 
 class MacAddress(rdfvalue.RDFBytes):
@@ -276,10 +381,53 @@ class Interfaces(protodict.RDFValueArray):
     return results
 
 
-# DEPRECATED - do not use.
-class GRRConfig(rdfvalue.RDFProtoStruct):
-  """The configuration of a GRR Client."""
-  protobuf = jobs_pb2.GRRConfig
+class Volume(structs.RDFProtoStruct):
+  """A disk volume on the client."""
+  protobuf = sysinfo_pb2.Volume
+
+  def FreeSpacePercent(self):
+    try:
+      return (self.actual_available_allocation_units /
+              float(self.total_allocation_units)) * 100.0
+    except ZeroDivisionError:
+      return 100
+
+  def FreeSpaceBytes(self):
+    return self.AUToBytes(self.actual_available_allocation_units)
+
+  def AUToBytes(self, allocation_units):
+    """Convert a number of allocation units to bytes."""
+    return (allocation_units * self.sectors_per_allocation_unit *
+            self.bytes_per_sector)
+
+  def AUToGBytes(self, allocation_units):
+    """Convert a number of allocation units to GigaBytes."""
+    return self.AUToBytes(allocation_units) / 1000.0 ** 3
+
+  def Name(self):
+    """Return the best available name for this volume."""
+    return (self.name or self.device_path or self.windows.drive_letter or
+            self.unix.mount_point or None)
+
+
+class Volumes(protodict.RDFValueArray):
+  """A list of disk volumes on the client."""
+  rdf_type = Volume
+
+
+class WindowsVolume(structs.RDFProtoStruct):
+  """A disk volume on a windows client."""
+  protobuf = sysinfo_pb2.WindowsVolume
+
+
+class UnixVolume(structs.RDFProtoStruct):
+  """A disk volume on a unix client."""
+  protobuf = sysinfo_pb2.UnixVolume
+
+
+class HardwareInfo(rdfvalue.RDFProtoStruct):
+  """Various hardware information."""
+  protobuf = sysinfo_pb2.HardwareInfo
 
 
 class ClientInformation(rdfvalue.RDFProtoStruct):
@@ -308,7 +456,7 @@ class CpuSample(rdfvalue.RDFProtoStruct):
 
     # Update the average from the new sample point.
     self.cpu_percent = (
-        self.cpu_percent * self._total_samples + sample.cpu_percent)/(
+        self.cpu_percent * self._total_samples + sample.cpu_percent) / (
             self._total_samples + 1)
 
     self._total_samples += 1
@@ -373,9 +521,15 @@ class ClientStats(rdfvalue.RDFProtoStruct):
 
     Args:
       sampling_interval: The sampling interval in seconds.
+    Returns:
+      New ClientStats object with cpu and IO samples downsampled.
     """
-    self.cpu_samples = self.DownsampleList(self.cpu_samples, sampling_interval)
-    self.io_samples = self.DownsampleList(self.io_samples, sampling_interval)
+    result = rdfvalue.ClientStats(self)
+    result.cpu_samples = self.DownsampleList(self.cpu_samples,
+                                             sampling_interval)
+    result.io_samples = self.DownsampleList(self.io_samples,
+                                            sampling_interval)
+    return result
 
 
 class DriverInstallTemplate(rdfvalue.RDFProtoStruct):
@@ -437,7 +591,7 @@ class StatMode(rdfvalue.RDFInteger):
     # Strip the "0b"
     bin_mode = bin(int(self))[2:]
     bin_mode = bin_mode[-9:]
-    bin_mode = "0" * (9-len(bin_mode)) + bin_mode
+    bin_mode = "0" * (9 - len(bin_mode)) + bin_mode
 
     bits = []
     for i in range(len(mode_template)):
@@ -587,20 +741,19 @@ class WMIRequest(rdfvalue.RDFProtoStruct):
   protobuf = jobs_pb2.WmiRequest
 
 
-class LaunchdJob(rdfvalue.RDFProtoStruct):
-  protobuf = sysinfo_pb2.LaunchdJob
+class WindowsServiceInformation(rdfvalue.RDFProtoStruct):
+  """Windows Service."""
+  protobuf = sysinfo_pb2.WindowsServiceInformation
 
 
-class Service(rdfvalue.RDFProtoStruct):
-  """Structure of a running service."""
-  protobuf = sysinfo_pb2.Service
-
-  rdf_map = dict(osx_launchd=LaunchdJob)
+class OSXServiceInformation(rdfvalue.RDFProtoStruct):
+  """OSX Service (launchagent/daemon)."""
+  protobuf = sysinfo_pb2.OSXServiceInformation
 
 
-class Services(protodict.RDFValueArray):
-  """Structure of a running service."""
-  rdf_type = Service
+class LinuxServiceInformation(rdfvalue.RDFProtoStruct):
+  """Linux Service (init/upstart/systemd)."""
+  protobuf = sysinfo_pb2.LinuxServiceInformation
 
 
 class ClientResources(rdfvalue.RDFProtoStruct):
@@ -609,6 +762,10 @@ class ClientResources(rdfvalue.RDFProtoStruct):
 
   dependencies = dict(ClientURN=ClientURN,
                       RDFURN=rdfvalue.RDFURN)
+
+
+class StatFSRequest(rdfvalue.RDFProtoStruct):
+  protobuf = jobs_pb2.StatFSRequest
 
 
 # Start of the Registry Specific Data types
@@ -651,3 +808,8 @@ class ClientCrash(rdfvalue.RDFProtoStruct):
 class ClientSummary(rdfvalue.RDFProtoStruct):
   """Object containing client's summary data."""
   protobuf = jobs_pb2.ClientSummary
+
+
+class GetClientStatsRequest(rdfvalue.RDFProtoStruct):
+  """Request for GetClientStats action."""
+  protobuf = jobs_pb2.GetClientStatsRequest
